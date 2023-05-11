@@ -37,25 +37,27 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	}, nil
 }
 
-func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, error) {
+func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, error) {
 	podList := make([]*model.PodInfo, 0)
 
 	service, err := c.clientset.CoreV1().Services(namespace).Get(context.Background(), serviceName, metav1.GetOptions{})
 	if err != nil {
 		log.Printf("Failed to get service %s: %v\n", serviceName, err)
-		return nil, err
+		return nil, nil, err
 	}
+
+	annotations := service.Annotations
 
 	podSelector := &metav1.LabelSelector{MatchLabels: service.Spec.Selector}
 	pods, err := c.clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(podSelector)})
 	if err != nil {
 		log.Printf("Failed to list pods for service %s: %v\n", serviceName, err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	for _, pod := range pods.Items {
 		podList = append(podList, &model.PodInfo{Name: pod.Name, Namespace: pod.Namespace, IP: pod.Status.PodIP, HostIP: pod.Status.HostIP})
 	}
 
-	return podList, nil
+	return podList, annotations, nil
 }

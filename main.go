@@ -5,69 +5,74 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
+	"gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/balancer"
 	client "gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/k3s-client"
 )
 
 var k3sClient *client.K3sClient
+var edgeBalancer *balancer.Balancer
+
 var ownIP string
+var namespace string
 
-func getOriginServer() *url.URL {
-
-	pods, err := k3sClient.GetPodsForService("default", "whoami-prx")
+func getOriginServer(service string) (*url.URL, string) {
+	pods, annotations, err := k3sClient.GetPodsForService(namespace, service)
 	if err != nil {
 		log.Println("Failed to retrieve pods for service :: ", err.Error())
-		return nil
+		return nil, ""
 	}
 
-	log.Println("Own IP is ::", ownIP)
-
-	var selectedIP string
-	for _, pod := range pods {
-		log.Println("Checking if", pod.HostIP, "is equal to Own IP")
-		if ownIP == pod.HostIP {
-			selectedIP = pod.IP
-		}
-	}
-
-	if selectedIP == "" {
-		log.Println("No pod found on self node, routing random")
-		index := rand.Intn(len(pods))
-		selectedIP = pods[index].IP
-	}
-
+	selectedIP, hostIP := edgeBalancer.ChoosePod(pods, annotations, service)
 	log.Println("Selected pod IP ::", selectedIP)
 
-	originServerURL, err := url.Parse("http://" + selectedIP + "/")
+	originServerURL, err := url.Parse("http://" + selectedIP + "/") //url.Parse("http://188.184.21.108/")
 	if err != nil {
-		log.Fatal("invalid origin server URL")
+		log.Fatal("Invalid origin server URL")
+		return nil, ""
 	}
 
-	return originServerURL
+	return originServerURL, hostIP
 }
 
-func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
-	log.Printf("[reverse proxy server] received request at: %s\n", time.Now())
-
-	originServerURL := getOriginServer()
-
+func forwardRequest(req *http.Request, originServerURL *url.URL, service string, hostIP string) (*http.Response, error) {
 	// set req Host, URL and Request URI to forward a request to the origin server
 	req.Host = originServerURL.Host
 	req.URL.Host = originServerURL.Host
 	req.URL.Scheme = originServerURL.Scheme
 	req.RequestURI = ""
 
-	// save the response from the origin server
-	originServerResponse, err := http.DefaultClient.Do(req)
+	var start time.Time
+	trace := &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			edgeBalancer.SetLatency(hostIP, int(time.Since(start).Milliseconds()), service)
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	start = time.Now()
 
-	log.Println("Complete URL was ::", req.URL.Host+req.URL.Path)
-	log.Println("Selected Pod responded with body ::", originServerResponse.Body)
+	return http.DefaultClient.Do(req)
+}
 
+func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
+	log.Printf("[reverse proxy server] received request at: %s\n", time.Now())
+
+	service := strings.Split(req.Host, ".")[0]
+	originServerURL, hostIP := getOriginServer(service)
+
+	if originServerURL == nil {
+		rw.WriteHeader(404)
+		_, _ = fmt.Fprint(rw, "No server for Host\n")
+		return
+	}
+	// get the response from the origin server
+	originServerResponse, err := forwardRequest(req, originServerURL, service, hostIP)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprint(rw, err)
@@ -83,6 +88,14 @@ func main() {
 	port := flag.String("p", "9090", "Port of reverse proxy")
 	flag.Parse()
 
+	ownIP = os.Getenv("NODE_IP")
+	namespace = os.Getenv("NAMESPACE")
+
+	if ownIP == "" || namespace == "" {
+		log.Fatal("ERROR :: Own IP or namespace not detected!")
+		return
+	}
+
 	var err error
 	k3sClient, err = client.NewSK3sClient("/etc/secret-volume/config")
 	if err != nil {
@@ -90,9 +103,7 @@ func main() {
 		return
 	}
 
-	ownIP = os.Getenv("NODE_IP")
-
-	rand.Seed(time.Now().Unix())
+	edgeBalancer = balancer.NewBalancer(ownIP)
 
 	reverseProxy := http.HandlerFunc(reverseProxyHandler)
 

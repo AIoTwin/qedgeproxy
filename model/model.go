@@ -6,3 +6,13 @@ type PodInfo struct {
 	IP        string
 	HostIP    string
 }
+
+type LatencyInfo struct {
+	AverageLatency int
+	ReqCount       int
+}
+
+type BestPodInfo struct {
+	IP     string
+	HostIP string
+}
