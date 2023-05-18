@@ -3,6 +3,9 @@ package client
 import (
 	"context"
 	"log"
+	"os"
+	"strconv"
+	"time"
 
 	"gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/model"
 
@@ -12,9 +15,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const defaultCacheTimeS int = 20
+
 type K3sClient struct {
-	config    *rest.Config
-	clientset *kubernetes.Clientset
+	config     *rest.Config
+	clientset  *kubernetes.Clientset
+	podCache   map[string]*model.PodInfoCache
+	cacheTimeS int
 }
 
 func NewSK3sClient(configFilePath string) (*K3sClient, error) {
@@ -31,13 +38,26 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 		return nil, err
 	}
 
+	cacheTime, err := strconv.Atoi(os.Getenv("CACHE_TIME_S"))
+	if err != nil {
+		cacheTime = defaultCacheTimeS
+	}
+	log.Println("Cache time set to", cacheTime, "s")
+
 	return &K3sClient{
-		config:    config,
-		clientset: clientset,
+		config:     config,
+		clientset:  clientset,
+		podCache:   make(map[string]*model.PodInfoCache, 0),
+		cacheTimeS: cacheTime,
 	}, nil
 }
 
 func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, error) {
+	if c.podCache[serviceName] != nil && int(time.Since(c.podCache[serviceName].CacheTime).Seconds()) < c.cacheTimeS {
+		log.Println("Returning cached data for service", serviceName)
+		return c.podCache[serviceName].Pods, c.podCache[serviceName].Annotations, nil
+	}
+
 	podList := make([]*model.PodInfo, 0)
 
 	service, err := c.clientset.CoreV1().Services(namespace).Get(context.Background(), serviceName, metav1.GetOptions{})
@@ -58,6 +78,14 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	for _, pod := range pods.Items {
 		podList = append(podList, &model.PodInfo{Name: pod.Name, Namespace: pod.Namespace, IP: pod.Status.PodIP, HostIP: pod.Status.HostIP})
 	}
+
+	if c.podCache[serviceName] == nil {
+		c.podCache[serviceName] = &model.PodInfoCache{}
+	}
+
+	c.podCache[serviceName].Pods = podList
+	c.podCache[serviceName].Annotations = annotations
+	c.podCache[serviceName].CacheTime = time.Now()
 
 	return podList, annotations, nil
 }

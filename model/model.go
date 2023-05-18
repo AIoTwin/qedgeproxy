@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 type PodInfo struct {
 	Namespace string
 	Name      string
@@ -15,4 +17,10 @@ type LatencyInfo struct {
 type BestPodInfo struct {
 	IP     string
 	HostIP string
+}
+
+type PodInfoCache struct {
+	CacheTime   time.Time
+	Pods        []*PodInfo
+	Annotations map[string]string
 }
