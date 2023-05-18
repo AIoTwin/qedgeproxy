@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 type PodInfo struct {
 	Namespace string
@@ -9,18 +13,19 @@ type PodInfo struct {
 	HostIP    string
 }
 
+type PodMetrics struct {
+	CPUUsage float64
+	RAMUsage float64
+}
+
 type LatencyInfo struct {
 	AverageLatency int
 	ReqCount       int
-}
-
-type BestPodInfo struct {
-	IP     string
-	HostIP string
 }
 
 type PodInfoCache struct {
 	CacheTime   time.Time
 	Pods        []*PodInfo
 	Annotations map[string]string
+	PodSelector *metav1.LabelSelector
 }

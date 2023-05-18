@@ -16,23 +16,16 @@ import (
 	client "gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/k3s-client"
 )
 
-var k3sClient *client.K3sClient
 var edgeBalancer *balancer.Balancer
 
 var ownIP string
 var namespace string
 
 func getOriginServer(service string) (*url.URL, string) {
-	pods, annotations, err := k3sClient.GetPodsForService(namespace, service)
-	if err != nil {
-		log.Println("Failed to retrieve pods for service :: ", err.Error())
-		return nil, ""
-	}
-
-	selectedIP, hostIP := edgeBalancer.ChoosePod(pods, annotations, service)
+	selectedIP, hostIP := edgeBalancer.ChoosePod(namespace, service)
 	log.Println("Selected pod IP ::", selectedIP)
 
-	originServerURL, err := url.Parse("http://" + selectedIP + "/") //url.Parse("http://188.184.21.108/")
+	originServerURL, err := url.Parse("http://188.184.21.108/") //url.Parse("http://" + selectedIP + "/")
 	if err != nil {
 		log.Fatal("Invalid origin server URL")
 		return nil, ""
@@ -96,14 +89,13 @@ func main() {
 		return
 	}
 
-	var err error
-	k3sClient, err = client.NewSK3sClient("/etc/secret-volume/config")
+	k3sClient, err := client.NewSK3sClient("/etc/secret-volume/config")
 	if err != nil {
 		log.Fatal("Error while initializing k3s client ::", err.Error())
 		return
 	}
 
-	edgeBalancer = balancer.NewBalancer(ownIP)
+	edgeBalancer = balancer.NewBalancer(k3sClient, ownIP)
 
 	reverseProxy := http.HandlerFunc(reverseProxyHandler)
 
