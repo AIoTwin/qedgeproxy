@@ -155,8 +155,8 @@ func (c *K3sClient) GetPodsStatus(namespace string, podSelector *metav1.LabelSel
 }
 
 func calculateWeight(ramValue float64, cpuValue float64, maxRamValue float64, maxCpuValue float64, minRamValue float64, minCpuValue float64) float64 {
-	ram := 1 - ((ramValue - minRamValue) / (maxRamValue - minRamValue))
-	cpu := 1 - ((cpuValue - minCpuValue) / (maxCpuValue - minCpuValue))
+	ram := (ramValue - minRamValue) / (maxRamValue - minRamValue)
+	cpu := (cpuValue - minCpuValue) / (maxCpuValue - minCpuValue)
 
 	// we add 2 so that values are in range [1,2]
 	return (ram + cpu + 2) / 2

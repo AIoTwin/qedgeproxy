@@ -5,7 +5,6 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-ping/ping"
@@ -22,8 +21,9 @@ type Balancer struct {
 	k3sClient     *client.K3sClient
 	qosPercentage float64
 	serviceInit   map[string]bool
-	runningAprx   map[string]*atomic.Int32
 	hostLatency   map[string]map[string]*model.LatencyInfo
+	channels      map[string]chan map[string]*model.LatencyInfo
+	approxRunning map[string]bool
 }
 
 func NewBalancer(k3sClient *client.K3sClient, ownIP string) *Balancer {
@@ -34,13 +34,16 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string) *Balancer {
 		qosPercentage = defaultPercentageQoS
 	}
 
+	channels := make(map[string]chan map[string]*model.LatencyInfo)
+
 	return &Balancer{
 		ownIP:         ownIP,
 		k3sClient:     k3sClient,
 		qosPercentage: qosPercentage,
 		hostLatency:   make(map[string]map[string]*model.LatencyInfo),
 		serviceInit:   make(map[string]bool),
-		runningAprx:   make(map[string]*atomic.Int32),
+		channels:      channels,
+		approxRunning: make(map[string]bool),
 	}
 }
 
@@ -53,18 +56,24 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 
 	// start apporixmating the request latency on first request for a service
 	if !b.serviceInit[service] {
-		b.runningAprx[service] = &atomic.Int32{}
-		b.runningAprx[service].Store(1)
 		b.serviceInit[service] = true
+		b.channels[service] = make(chan map[string]*model.LatencyInfo)
 
 		podsHostMap := podsHostMap(pods)
+		b.approxRunning[service] = true
 		go b.ApproximateLatency(namespace, podSelector, service, podsHostMap)
-	}
-
-	// until approximation is done, route randomly
-	if b.runningAprx[service].Load() == 1 {
-		index := rand.Intn(len(pods))
-		return pods[index].IP, pods[index].HostIP
+	} else {
+		select {
+		case x, ok := <-b.channels[service]:
+			if ok {
+				b.approxRunning[service] = false
+				b.adjustLatencies(service, x)
+			} else {
+				log.Println("Channel closed for service", service)
+			}
+		default:
+			log.Println("No value ready for service", service, ", moving on.")
+		}
 	}
 
 	maxVal, err := strconv.Atoi(annotations["maxLatency"])
@@ -74,8 +83,11 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 	maxLatency := maxVal
 	var bestPodIPs []model.PodInfo
 
-	// then try to find node with least latency
 	for _, pod := range pods {
+		if b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil {
+			continue
+		}
+
 		value := b.hostLatency[pod.HostIP][service].AverageLatency
 		if value < maxLatency {
 			bestPodIPs = append(bestPodIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
@@ -90,10 +102,9 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 	}
 
 	// not enough QoS pods, recalculate!
-	if b.runningAprx[service].Load() == 0 && b.checkQoSMin(len(pods), len(bestPodIPs)) {
-		b.runningAprx[service].Store(1)
-
+	if !b.approxRunning[service] && b.checkQoSMin(len(pods), len(bestPodIPs)) {
 		podsHostMap := podsHostMap(pods)
+		b.approxRunning[service] = true
 		go b.ApproximateLatency(namespace, podSelector, service, podsHostMap)
 	}
 
@@ -113,13 +124,6 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 // potentially add logic that "resets" reqCount after 100 or after certain period
 // so more weight is given to the more recent calculations
 func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
-
-	// while approximation is calculated, ignore incoming request latencies
-	// to avoid conncurent modification
-	if b.runningAprx[service].Load() == 1 {
-		return
-	}
-
 	latencyHost := b.hostLatency[hostIP]
 	if latencyHost == nil {
 		b.hostLatency[hostIP] = make(map[string]*model.LatencyInfo)
@@ -146,14 +150,13 @@ func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
 }
 
 func (b *Balancer) ApproximateLatency(namespace string, podSelector *metav1.LabelSelector, service string, podsHostMap map[string]string) {
-	defer b.runningAprx[service].Store(0)
-
 	podsStatus, err := b.k3sClient.GetPodsStatus(namespace, podSelector, podsHostMap)
 	if err != nil {
 		log.Println("Failed to retrieve status of pods")
 	}
 
 	hostAverages := b.getHostAverages()
+	hostLatency := make(map[string]*model.LatencyInfo)
 
 	for k, weight := range podsStatus {
 		var latency float64
@@ -174,20 +177,19 @@ func (b *Balancer) ApproximateLatency(namespace string, podSelector *metav1.Labe
 			}
 		}
 
-		if b.hostLatency[k] == nil {
-			b.hostLatency[k] = make(map[string]*model.LatencyInfo)
-		}
-
-		if b.hostLatency[k][service] == nil {
-			b.hostLatency[k][service] = &model.LatencyInfo{
+		if hostLatency[k] == nil {
+			hostLatency[k] = &model.LatencyInfo{
 				AverageLatency: int(weight * latency),
 				ReqCount:       1,
 			}
 		} else {
-			b.hostLatency[k][service].AverageLatency = int(weight * latency)
-			b.hostLatency[k][service].ReqCount = 1
+			hostLatency[k].AverageLatency = int(weight * latency)
+			hostLatency[k].ReqCount = 1
 		}
 	}
+
+	// new latencies calculated, give it to the main thread
+	b.channels[service] <- hostLatency
 }
 
 func (b *Balancer) getHostAverages() map[string]int {
@@ -201,6 +203,23 @@ func (b *Balancer) getHostAverages() map[string]int {
 	}
 
 	return result
+}
+
+func (b *Balancer) adjustLatencies(service string, x map[string]*model.LatencyInfo) {
+	for k, v := range x {
+		if b.hostLatency[k] == nil {
+			b.hostLatency[k] = make(map[string]*model.LatencyInfo)
+		}
+		if b.hostLatency[k][service] == nil {
+			b.hostLatency[k][service] = &model.LatencyInfo{
+				AverageLatency: v.AverageLatency,
+				ReqCount:       v.ReqCount,
+			}
+		} else {
+			b.hostLatency[k][service].AverageLatency = v.AverageLatency
+			b.hostLatency[k][service].ReqCount = v.ReqCount
+		}
+	}
 }
 
 func (b *Balancer) checkQoSMin(podNum int, goodPodsNum int) bool {
