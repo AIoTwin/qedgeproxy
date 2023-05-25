@@ -10,7 +10,6 @@ import (
 	"gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/model"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -19,13 +18,19 @@ import (
 )
 
 const defaultCacheTimeS int = 20
+const defaultNodesMetricsCacheTimeS = 60
 
 type K3sClient struct {
 	config           *rest.Config
 	clientset        *kubernetes.Clientset
 	metricsClientset *metricsv.Clientset
 	podCache         map[string]*model.PodInfoCache
-	cacheTimeS       int
+
+	nodesStatus    map[string]*model.NodeMetrics
+	nodesCacheTime int
+	nodesTime      time.Time
+
+	cacheTimeS int
 }
 
 func NewSK3sClient(configFilePath string) (*K3sClient, error) {
@@ -54,19 +59,25 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	}
 	log.Println("Cache time set to", cacheTime, "s")
 
+	nodesMetricsCacheTimeS, err := strconv.Atoi(os.Getenv("NODE_METRICS_CACHE_TIME"))
+	if err != nil {
+		nodesMetricsCacheTimeS = defaultNodesMetricsCacheTimeS
+	}
+
 	return &K3sClient{
 		config:           config,
 		clientset:        clientset,
 		metricsClientset: metricsClientset,
 		podCache:         make(map[string]*model.PodInfoCache, 0),
+		nodesCacheTime:   nodesMetricsCacheTimeS,
 		cacheTimeS:       cacheTime,
 	}, nil
 }
 
-func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, *metav1.LabelSelector, map[string]string, error) {
+func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, error) {
 	if c.podCache[serviceName] != nil && int(time.Since(c.podCache[serviceName].CacheTime).Seconds()) < c.cacheTimeS {
 		log.Println("Returning cached data for service", serviceName)
-		return c.podCache[serviceName].Pods, c.podCache[serviceName].PodSelector, c.podCache[serviceName].Annotations, nil
+		return c.podCache[serviceName].Pods, c.podCache[serviceName].Annotations, nil
 	}
 
 	podList := make([]*model.PodInfo, 0)
@@ -74,7 +85,7 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	service, err := c.clientset.CoreV1().Services(namespace).Get(context.Background(), serviceName, metav1.GetOptions{})
 	if err != nil {
 		log.Printf("Failed to get service %s: %v\n", serviceName, err)
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	annotations := service.Annotations
@@ -83,7 +94,7 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	pods, err := c.clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(podSelector)})
 	if err != nil {
 		log.Printf("Failed to list pods for service %s: %v\n", serviceName, err)
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	for _, pod := range pods.Items {
@@ -98,66 +109,60 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	c.podCache[serviceName].Annotations = annotations
 	c.podCache[serviceName].CacheTime = time.Now()
 
-	return podList, podSelector, annotations, nil
+	log.Println("Adjusting pods cache")
+
+	return podList, annotations, nil
 }
 
-func (c *K3sClient) GetPodsStatus(namespace string, podSelector *metav1.LabelSelector, podsHostMap map[string]string) (map[string]float64, error) {
-	podMetricsList, err := c.metricsClientset.MetricsV1beta1().PodMetricses(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(podSelector)})
+func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
+	if c.nodesStatus != nil && int(time.Since(c.nodesTime).Seconds()) < c.nodesCacheTime {
+		log.Println("Using node status cache")
+		return c.nodesStatus, nil
+	}
+
+	nodes, err := c.clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Printf("Failed to list pod metrics: %v\n", err)
+		log.Printf("Failed to list nodes: %v\n", err)
 		return nil, err
 	}
 
-	maxCpuUsage, maxRamUsage := 1.0, 1.0
-	minCpuUsage, minRamUsage := 0.0, 0.0
-	var metrics = make(map[string]*model.PodMetrics, 0)
-	for _, podMetrics := range podMetricsList.Items {
+	hostMap := make(map[string]*model.NodeMetrics)
 
-		var cpuUsageQ, ramUsageQ resource.Quantity
-		for _, container := range podMetrics.Containers {
-			cpuUsageQ.Add(container.Usage[corev1.ResourceCPU])
-			ramUsageQ.Add(container.Usage[corev1.ResourceMemory])
-		}
-		cpuUsage := cpuUsageQ.AsApproximateFloat64()
-		ramUsage := ramUsageQ.AsApproximateFloat64()
+	for _, node := range nodes.Items {
+		allocatableCPU := float64(node.Status.Allocatable.Cpu().MilliValue())
+		capacityCPU := float64(node.Status.Capacity.Cpu().MilliValue())
 
-		if cpuUsage > maxCpuUsage {
-			maxCpuUsage = cpuUsage
-		}
-		if cpuUsage < minCpuUsage {
-			minCpuUsage = cpuUsage
+		allocatableMemory := float64(node.Status.Allocatable.Memory().Value())
+		capacityMemory := float64(node.Status.Capacity.Memory().Value())
+
+		cpuUsagePercent := (1.0 - (allocatableCPU / capacityCPU)) * 100.0
+		ramUsagePercent := (1.0 - (allocatableMemory / capacityMemory)) * 100.0
+
+		hostIP := getHostIp(node)
+		if hostIP == "" {
+			continue
 		}
 
-		if ramUsage > maxRamUsage {
-			maxRamUsage = ramUsage
-		}
-		if ramUsage < minRamUsage {
-			minRamUsage = ramUsage
-		}
-
-		if val, ok := metrics[podsHostMap[podMetrics.ObjectMeta.Name]]; !ok {
-			metrics[podsHostMap[podMetrics.ObjectMeta.Name]] = &model.PodMetrics{
-				CPUUsage: cpuUsage,
-				RAMUsage: ramUsage,
-			}
-		} else {
-			val.CPUUsage = (val.CPUUsage + cpuUsage) / 2
-			val.RAMUsage = (val.RAMUsage + ramUsage) / 2
+		hostMap[hostIP] = &model.NodeMetrics{
+			CpuUsage: cpuUsagePercent,
+			RamUsage: ramUsagePercent,
 		}
 	}
 
-	var resultMetrics = make(map[string]float64)
-	for k, v := range metrics {
-		resultMetrics[k] = calculateWeight(v.RAMUsage, v.CPUUsage, maxRamUsage, maxCpuUsage, minRamUsage, minCpuUsage)
-	}
+	log.Println("Returning host status ::", hostMap)
 
-	return resultMetrics, nil
+	c.nodesStatus = hostMap
+	c.nodesTime = time.Now()
+
+	return hostMap, nil
 }
 
-func calculateWeight(ramValue float64, cpuValue float64, maxRamValue float64, maxCpuValue float64, minRamValue float64, minCpuValue float64) float64 {
-	ram := (ramValue - minRamValue) / (maxRamValue - minRamValue)
-	cpu := (cpuValue - minCpuValue) / (maxCpuValue - minCpuValue)
+func getHostIp(node corev1.Node) string {
+	for _, val := range node.Status.Addresses {
+		if val.Type == corev1.NodeInternalIP {
+			return val.Address
+		}
+	}
 
-	// we add 2 so that values are in range [1,2]
-	return (ram + cpu + 2) / 2
+	return ""
 }

@@ -1,32 +1,58 @@
 package balancer
 
 import (
+	"io/ioutil"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
+	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
-	"github.com/go-ping/ping"
 	client "gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/k3s-client"
 	"gitlab.tel.fer.hr/vjukanovic/k3s-custom-routing/model"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const defaultMaxLatency int = 300
 const defaultPercentageQoS float64 = 0.3
+const defaultNewLatencyWeight float64 = 0.2
+const defaultCooldownBaseDuration int = 30
+const defaultRealDataPeriod int = 360
+const defaultPingTimeout int = 1
+const defaultPingCacheTime int = 100
+const defaultQosRecalculationCooldownS = 60
+
+const pingURLSuffix string = "/echo?param1=value1&param2=value2"
 
 type Balancer struct {
-	ownIP         string
-	k3sClient     *client.K3sClient
-	qosPercentage float64
+	ownIP     string
+	k3sClient *client.K3sClient
+
+	qosPercentage             float64
+	qosRecalculationTime      map[string]time.Time
+	qosRecalculationCooldownS int
+
+	latencyWeight         float64
+	realDataPeriodS       int
+	cooldownBaseDurationS int
+
+	pingPort      string
+	pingTimeout   int
+	pingCacheTime int
+	hostPingCache map[string]*model.PingCache
+
+	randomMode bool
+
 	serviceInit   map[string]bool
-	hostLatency   map[string]map[string]*model.LatencyInfo
-	channels      map[string]chan map[string]*model.LatencyInfo
-	approxRunning map[string]bool
+	hostLatency   map[string]map[string]*model.HostData
+	maxLatencies  map[string]int
+	channels      map[string]chan map[string]*model.HostData
+	approxRunning map[string]*atomic.Bool
 }
 
-func NewBalancer(k3sClient *client.K3sClient, ownIP string) *Balancer {
+func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Balancer {
 	rand.Seed(time.Now().Unix())
 
 	qosPercentage, err := strconv.ParseFloat(os.Getenv("QOS_PERC"), 64)
@@ -34,39 +60,100 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string) *Balancer {
 		qosPercentage = defaultPercentageQoS
 	}
 
-	channels := make(map[string]chan map[string]*model.LatencyInfo)
+	newLatencyWeight, err := strconv.ParseFloat(os.Getenv("LAT_WEIGHT"), 64)
+	if err != nil {
+		newLatencyWeight = defaultNewLatencyWeight
+	}
+
+	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION"))
+	if err != nil {
+		cooldownBaseDuration = defaultCooldownBaseDuration
+	}
+
+	realDataPeriod, err := strconv.Atoi(os.Getenv("REAL_DATA_VALID"))
+	if err != nil {
+		realDataPeriod = defaultRealDataPeriod
+	}
+
+	pingTimeout, err := strconv.Atoi(os.Getenv("PING_TIMEOUT"))
+	if err != nil {
+		pingTimeout = defaultPingTimeout
+	}
+
+	pingCacheTime, err := strconv.Atoi(os.Getenv("PING_CACHE_TIME"))
+	if err != nil {
+		pingTimeout = defaultPingCacheTime
+	}
+
+	qosRecalculationCooldownS, err := strconv.Atoi(os.Getenv("QOS_COOLDOWN"))
+	if err != nil {
+		qosRecalculationCooldownS = defaultQosRecalculationCooldownS
+	}
+
+	randomMode, err := strconv.ParseBool(os.Getenv("RANDOM_MODE"))
+	if err != nil {
+		randomMode = true
+	}
+
+	channels := make(map[string]chan map[string]*model.HostData)
 
 	return &Balancer{
-		ownIP:         ownIP,
-		k3sClient:     k3sClient,
-		qosPercentage: qosPercentage,
-		hostLatency:   make(map[string]map[string]*model.LatencyInfo),
-		serviceInit:   make(map[string]bool),
-		channels:      channels,
-		approxRunning: make(map[string]bool),
+		ownIP:                     ownIP,
+		k3sClient:                 k3sClient,
+		qosPercentage:             qosPercentage,
+		latencyWeight:             newLatencyWeight,
+		cooldownBaseDurationS:     cooldownBaseDuration,
+		qosRecalculationCooldownS: qosRecalculationCooldownS,
+		qosRecalculationTime:      make(map[string]time.Time),
+		realDataPeriodS:           realDataPeriod,
+		pingPort:                  pingPort,
+		pingTimeout:               pingTimeout,
+		pingCacheTime:             pingCacheTime,
+		randomMode:                randomMode,
+		hostPingCache:             make(map[string]*model.PingCache),
+		hostLatency:               make(map[string]map[string]*model.HostData),
+		serviceInit:               make(map[string]bool),
+		maxLatencies:              make(map[string]int),
+		channels:                  channels,
+		approxRunning:             make(map[string]*atomic.Bool),
 	}
 }
 
 func (b *Balancer) ChoosePod(namespace string, service string) (string, string) {
-	pods, podSelector, annotations, err := b.k3sClient.GetPodsForService(namespace, service)
+	podsAll, annotations, err := b.k3sClient.GetPodsForService(namespace, service)
 	if err != nil {
 		log.Println("Failed to retrieve pods for service :: ", err.Error())
 		return "", ""
 	}
+	pods := b.filterHealthyPods(podsAll, service)
+	if len(pods) == 0 {
+		log.Println("No pods found for service, returning nil ::", service)
+		return "", ""
+	}
+
+	maxVal, err := strconv.Atoi(annotations["maxLatency"])
+	if err != nil {
+		maxVal = defaultMaxLatency
+	}
+	maxLatency := maxVal
 
 	// start apporixmating the request latency on first request for a service
 	if !b.serviceInit[service] {
 		b.serviceInit[service] = true
-		b.channels[service] = make(chan map[string]*model.LatencyInfo)
+		b.channels[service] = make(chan map[string]*model.HostData)
+		b.maxLatencies[service] = maxLatency
 
-		podsHostMap := podsHostMap(pods)
-		b.approxRunning[service] = true
-		go b.ApproximateLatency(namespace, podSelector, service, podsHostMap)
+		b.approxRunning[service] = &atomic.Bool{}
+		b.approxRunning[service].Store(true)
+
+		b.qosRecalculationTime[service] = time.Now()
+
+		go b.ApproximateLatency(podsAll, service, maxLatency)
 	} else {
 		select {
 		case x, ok := <-b.channels[service]:
 			if ok {
-				b.approxRunning[service] = false
+				b.approxRunning[service].Store(false)
 				b.adjustLatencies(service, x)
 			} else {
 				log.Println("Channel closed for service", service)
@@ -76,36 +163,58 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		}
 	}
 
-	maxVal, err := strconv.Atoi(annotations["maxLatency"])
-	if err != nil {
-		maxVal = defaultMaxLatency
-	}
-	maxLatency := maxVal
 	var bestPodIPs []model.PodInfo
+	var overloadedPodsIPs []model.PodInfo
+	skipNodeStatus := false
+
+	nodeStatus, err := b.k3sClient.GetNodesStatus()
+	if err != nil {
+		log.Println("Failed retrieving node status ::", nodeStatus)
+		skipNodeStatus = true
+	}
 
 	for _, pod := range pods {
 		if b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil {
 			continue
 		}
 
-		value := b.hostLatency[pod.HostIP][service].AverageLatency
-		if value < maxLatency {
-			bestPodIPs = append(bestPodIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
+		serviceStatus := b.hostLatency[pod.HostIP][service]
+		if serviceStatus.Latency < maxLatency {
+			if !skipNodeStatus && (nodeStatus[pod.HostIP].CpuUsage > 0.9 || nodeStatus[pod.HostIP].RamUsage > 0.9) {
+				overloadedPodsIPs = append(overloadedPodsIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
+			} else {
+				bestPodIPs = append(bestPodIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
+			}
 		}
+	}
+
+	// if there are no good pod IPs with good latency, send to overloaded ones
+	if len(bestPodIPs) == 0 {
+		bestPodIPs = overloadedPodsIPs
+	}
+
+	// not enough QoS pods, recalculate!
+	if !b.checkQoSMin(len(pods), len(bestPodIPs)+len(overloadedPodsIPs)) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
+		log.Println("QoS Min check failed! Running approximation again")
+		b.qosRecalculationTime[service] = time.Now()
+		go b.ApproximateLatency(podsAll, service, maxLatency)
 	}
 
 	// select a random pod from pods that satisfy QoS
 	if len(bestPodIPs) > 0 {
-		log.Println("Choosing a random Pod IP from the list that satisify QoS")
 		index := rand.Intn(len(bestPodIPs))
-		return bestPodIPs[index].IP, bestPodIPs[index].HostIP
-	}
+		if b.randomMode {
+			log.Println("Choosing a random Pod IP from the list that satisify QoS")
+			return bestPodIPs[index].IP, bestPodIPs[index].HostIP
+		} else {
+			sort.SliceStable(bestPodIPs, func(i, j int) bool {
+				return b.hostLatency[bestPodIPs[i].HostIP][service].Latency < b.hostLatency[bestPodIPs[j].HostIP][service].Latency
+			})
 
-	// not enough QoS pods, recalculate!
-	if !b.approxRunning[service] && b.checkQoSMin(len(pods), len(bestPodIPs)) {
-		podsHostMap := podsHostMap(pods)
-		b.approxRunning[service] = true
-		go b.ApproximateLatency(namespace, podSelector, service, podsHostMap)
+			log.Println("Selected a random pod based on Node resource usage and latency")
+
+			return bestPodIPs[0].IP, bestPodIPs[0].HostIP
+		}
 	}
 
 	// if none are valid select on own pod
@@ -116,120 +225,172 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		}
 	}
 
+	log.Println("Other routing roules failed, routing random")
 	// all else fails, revert to random
 	index := rand.Intn(len(pods))
 	return pods[index].IP, pods[index].HostIP
 }
 
-// potentially add logic that "resets" reqCount after 100 or after certain period
-// so more weight is given to the more recent calculations
 func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
 	latencyHost := b.hostLatency[hostIP]
 	if latencyHost == nil {
-		b.hostLatency[hostIP] = make(map[string]*model.LatencyInfo)
-		b.hostLatency[hostIP][service] = &model.LatencyInfo{
-			AverageLatency: latency,
-			ReqCount:       1,
+		b.hostLatency[hostIP] = make(map[string]*model.HostData)
+		b.hostLatency[hostIP][service] = &model.HostData{
+			Latency:          latency,
+			IsServiceHealthy: true,
+			IsApproximated:   false,
+			FailedReqCounter: 0,
+			ReqTime:          time.Now(),
 		}
+		log.Println("Adjust latency data for |", hostIP, service, "| => |", b.hostLatency[hostIP][service], "|")
 		return
 	}
 
-	latencyInfo := latencyHost[service]
-	if latencyInfo == nil {
-		latencyHost[service] = &model.LatencyInfo{
-			AverageLatency: latency,
-			ReqCount:       1,
+	if latencyHost[service] == nil {
+		latencyHost[service] = &model.HostData{
+			Latency:          latency,
+			IsServiceHealthy: true,
+			IsApproximated:   false,
+			FailedReqCounter: 0,
+			ReqTime:          time.Now(),
 		}
+		log.Println("Adjust latency data for |", hostIP, service, "| => |", b.hostLatency[hostIP][service], "|")
 		return
 	}
 
-	latencyInfo.AverageLatency = (latencyInfo.AverageLatency*latencyInfo.ReqCount + latency) / (latencyInfo.ReqCount + 1)
-	latencyInfo.ReqCount++
+	latencyHost[service].Latency = int((1-b.latencyWeight)*float64(latencyHost[service].Latency) + b.latencyWeight*float64(latencyHost[service].Latency))
+	latencyHost[service].FailedReqCounter = 0
+	latencyHost[service].IsApproximated = false
+	latencyHost[service].IsServiceHealthy = true
+	latencyHost[service].ReqTime = time.Now()
 
-	log.Println("Adjust latency data for |", hostIP, service, "| => |", latencyInfo.AverageLatency, latencyInfo.ReqCount, "|")
+	log.Println("Adjust latency data for |", hostIP, service, "| => |", latencyHost[service], "|")
 }
 
-func (b *Balancer) ApproximateLatency(namespace string, podSelector *metav1.LabelSelector, service string, podsHostMap map[string]string) {
-	podsStatus, err := b.k3sClient.GetPodsStatus(namespace, podSelector, podsHostMap)
-	if err != nil {
-		log.Println("Failed to retrieve status of pods")
+func (b *Balancer) SetReqFailed(hostIP string, service string) {
+	if b.hostLatency[hostIP] == nil {
+		b.hostLatency[hostIP] = make(map[string]*model.HostData)
 	}
 
-	hostAverages := b.getHostAverages()
-	hostLatency := make(map[string]*model.LatencyInfo)
+	if b.hostLatency[hostIP][service] == nil {
+		b.hostLatency[hostIP][service] = &model.HostData{
+			IsServiceHealthy: false,
+			ReqTime:          time.Now(),
+			FailedReqCounter: 1,
+		}
+	} else {
+		b.hostLatency[hostIP][service].IsServiceHealthy = false
+		b.hostLatency[hostIP][service].ReqTime = time.Now()
+		b.hostLatency[hostIP][service].FailedReqCounter++
+	}
 
-	for k, weight := range podsStatus {
-		var latency float64
+	log.Println("Request failed, sending on cooldown ::", b.hostLatency[hostIP][service])
+}
 
-		if val, ok := hostAverages[k]; ok {
-			latency = float64(val)
+func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, maxLatency int) {
+	hostLatency := make(map[string]*model.HostData)
+	log.Println("Approximating latency for service", service)
+
+	for _, pod := range pods {
+		var latency int
+
+		if hostLatency[pod.HostIP] != nil {
+			continue
+		}
+
+		if val, ok := b.hostPingCache[pod.HostIP]; ok && int(time.Since(val.CacheTime).Seconds()) < b.pingCacheTime {
+			latency = val.Latency
+			log.Println("Using cached latency for host", pod.HostIP)
 		} else {
-			pinger, err := ping.NewPinger("188.184.21.108")
-			if err != nil {
-				latency = float64(defaultMaxLatency)
+			latency = pingHost("http://"+pod.HostIP+":"+b.pingPort+pingURLSuffix, b.pingTimeout)
+
+			if latency == -1 {
+				latency = maxLatency
 			} else {
-				pinger.Count = 1
-				pinger.Run()
-
-				stats := pinger.Statistics()
-
-				latency = float64(stats.AvgRtt.Milliseconds())
+				b.hostPingCache[pod.HostIP] = &model.PingCache{
+					CacheTime: time.Now(),
+					Latency:   latency,
+				}
 			}
 		}
 
-		if hostLatency[k] == nil {
-			hostLatency[k] = &model.LatencyInfo{
-				AverageLatency: int(weight * latency),
-				ReqCount:       1,
-			}
-		} else {
-			hostLatency[k].AverageLatency = int(weight * latency)
-			hostLatency[k].ReqCount = 1
+		hostLatency[pod.HostIP] = &model.HostData{
+			Latency:        latency,
+			IsApproximated: true,
 		}
+
 	}
 
 	// new latencies calculated, give it to the main thread
 	b.channels[service] <- hostLatency
 }
 
-func (b *Balancer) getHostAverages() map[string]int {
-	result := make(map[string]int)
-	for kHost, vHost := range b.hostLatency {
-		for _, vSer := range vHost {
-			if result[kHost] > vSer.AverageLatency {
-				result[kHost] = vSer.AverageLatency
-			}
-		}
-	}
-
-	return result
-}
-
-func (b *Balancer) adjustLatencies(service string, x map[string]*model.LatencyInfo) {
+func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData) {
 	for k, v := range x {
 		if b.hostLatency[k] == nil {
-			b.hostLatency[k] = make(map[string]*model.LatencyInfo)
+			b.hostLatency[k] = make(map[string]*model.HostData)
 		}
+
 		if b.hostLatency[k][service] == nil {
-			b.hostLatency[k][service] = &model.LatencyInfo{
-				AverageLatency: v.AverageLatency,
-				ReqCount:       v.ReqCount,
-			}
+			b.hostLatency[k][service] = v
 		} else {
-			b.hostLatency[k][service].AverageLatency = v.AverageLatency
-			b.hostLatency[k][service].ReqCount = v.ReqCount
+			if int(time.Since(b.hostLatency[k][service].ReqTime).Seconds()) < b.realDataPeriodS || b.hostLatency[k][service].IsApproximated {
+				b.hostLatency[k][service].Latency = v.Latency
+				b.hostLatency[k][service].IsApproximated = v.IsApproximated
+			}
 		}
 	}
 }
 
 func (b *Balancer) checkQoSMin(podNum int, goodPodsNum int) bool {
-	return float64(goodPodsNum)/float64(podNum) > b.qosPercentage
+	return float64(goodPodsNum)/float64(podNum) >= b.qosPercentage
 }
 
-func podsHostMap(pods []*model.PodInfo) map[string]string {
-	result := make(map[string]string)
+func (b *Balancer) isServiceInTimeout(serviceStatus *model.HostData) bool {
+	isInTimeout := time.Since(serviceStatus.ReqTime).Seconds() < float64(b.cooldownBaseDurationS)*float64(serviceStatus.FailedReqCounter)
+
+	return !serviceStatus.IsServiceHealthy && isInTimeout
+}
+
+func (b *Balancer) filterHealthyPods(pods []*model.PodInfo, service string) []*model.PodInfo {
+	result := make([]*model.PodInfo, 0)
 	for _, pod := range pods {
-		result[pod.Name] = pod.HostIP
+		serviceStatus := b.hostLatency[pod.HostIP][service]
+		if serviceStatus == nil || !b.isServiceInTimeout(serviceStatus) {
+			result = append(result, pod)
+		}
 	}
+
 	return result
+}
+
+func pingHost(hostUrl string, timeoutS int) int {
+	start := time.Now()
+	client := &http.Client{
+		Timeout: time.Duration(timeoutS) * time.Second, // Set the timeout duration
+	}
+
+	request, err := http.NewRequest("GET", hostUrl, nil)
+	if err != nil {
+		log.Fatal("Error creating GET request:", err.Error())
+		return -1
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		log.Fatal("Error sending GET request:", err.Error())
+		return -1
+	}
+	defer response.Body.Close()
+
+	// Read the response body
+	_, err = ioutil.ReadAll(response.Body)
+	if err != nil {
+		log.Fatal("Error reading response body:", err.Error())
+		return -1
+	}
+
+	log.Println("Host pinged! Result", time.Since(start))
+
+	return int(time.Since(start).Milliseconds())
 }

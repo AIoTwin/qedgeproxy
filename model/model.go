@@ -13,14 +13,22 @@ type PodInfo struct {
 	HostIP    string
 }
 
-type PodMetrics struct {
-	CPUUsage float64
-	RAMUsage float64
+type NodeMetrics struct {
+	CpuUsage float64
+	RamUsage float64
 }
 
-type LatencyInfo struct {
-	AverageLatency int
-	ReqCount       int
+type HostData struct {
+	Latency          int
+	IsApproximated   bool
+	IsServiceHealthy bool
+	ReqTime          time.Time
+	FailedReqCounter int
+}
+
+type PingCache struct {
+	CacheTime time.Time
+	Latency   int
 }
 
 type PodInfoCache struct {

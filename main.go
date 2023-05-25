@@ -1,12 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
@@ -23,9 +23,13 @@ var namespace string
 
 func getOriginServer(service string) (*url.URL, string) {
 	selectedIP, hostIP := edgeBalancer.ChoosePod(namespace, service)
+	if selectedIP == "" {
+		return nil, ""
+	}
+
 	log.Println("Selected pod IP ::", selectedIP)
 
-	originServerURL, err := url.Parse("http://188.184.21.108/") //url.Parse("http://" + selectedIP + "/")
+	originServerURL, err := url.Parse("http://localhost:3000/") //url.Parse("http://" + selectedIP + "/")
 	if err != nil {
 		log.Fatal("Invalid origin server URL")
 		return nil, ""
@@ -40,15 +44,6 @@ func forwardRequest(req *http.Request, originServerURL *url.URL, service string,
 	req.URL.Host = originServerURL.Host
 	req.URL.Scheme = originServerURL.Scheme
 	req.RequestURI = ""
-
-	var start time.Time
-	trace := &httptrace.ClientTrace{
-		GotFirstResponseByte: func() {
-			edgeBalancer.SetLatency(hostIP, int(time.Since(start).Milliseconds()), service)
-		},
-	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	start = time.Now()
 
 	return http.DefaultClient.Do(req)
 }
@@ -65,16 +60,54 @@ func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// get the response from the origin server
+	start := time.Now()
 	originServerResponse, err := forwardRequest(req, originServerURL, service, hostIP)
 	if err != nil {
+		edgeBalancer.SetReqFailed(hostIP, service)
 		rw.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprint(rw, err)
 		return
 	}
+	edgeBalancer.SetLatency(hostIP, int(time.Since(start).Milliseconds()), service)
 
 	// return response to the client
 	rw.WriteHeader(http.StatusOK)
 	io.Copy(rw, originServerResponse.Body)
+}
+
+func echoHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		fmt.Fprintf(w, "Method not allowed")
+		return
+	}
+
+	// Get the query parameters from the request
+	queryParams := r.URL.Query()
+
+	// Set the Content-Type header to match the request
+	contentType := r.Header.Get("Content-Type")
+	w.Header().Set("Content-Type", contentType)
+
+	// Create a response body by encoding the query parameters as JSON
+	response := make(map[string]interface{})
+	for key, values := range queryParams {
+		if len(values) > 0 {
+			response[key] = values[0]
+		}
+	}
+
+	// Encode the response as JSON
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error encoding response: %v", err)
+		return
+	}
+
+	// Write the response body back as the response
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseJSON)
 }
 
 func main() {
@@ -95,10 +128,14 @@ func main() {
 		return
 	}
 
-	edgeBalancer = balancer.NewBalancer(k3sClient, ownIP)
+	edgeBalancer = balancer.NewBalancer(k3sClient, ownIP, "30090")
 
 	reverseProxy := http.HandlerFunc(reverseProxyHandler)
 
+	mux := http.NewServeMux()
+	mux.Handle("/", reverseProxy)
+	mux.HandleFunc("/echo", echoHandler)
+
 	log.Println("Starting proxy at port " + *port)
-	log.Fatal(http.ListenAndServe(":"+(*port), reverseProxy))
+	log.Fatal(http.ListenAndServe(":"+(*port), mux))
 }
