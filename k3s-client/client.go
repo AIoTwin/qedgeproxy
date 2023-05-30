@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	v1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
@@ -125,21 +126,33 @@ func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
 
 	nodes, err := c.clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Printf("Failed to list nodes: %v\n", err)
+		log.Println("Failed to retrieve nodes on node status")
 		return nil, err
 	}
 
+	nodeMetricsList, err := c.metricsClientset.MetricsV1beta1().NodeMetricses().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		log.Println("Failed to retrieve node metrices on node status")
+		return nil, err
+	}
+
+	nodeMetricsMap := make(map[string]v1beta1.NodeMetrics)
+	for _, nodeMetric := range nodeMetricsList.Items {
+		nodeMetricsMap[nodeMetric.Name] = nodeMetric
+	}
+
 	hostMap := make(map[string]*model.NodeMetrics)
-
 	for _, node := range nodes.Items {
-		allocatableCPU := float64(node.Status.Allocatable.Cpu().MilliValue())
-		capacityCPU := float64(node.Status.Capacity.Cpu().MilliValue())
+		nodeMetric, exists := nodeMetricsMap[node.Name]
+		if !exists {
+			continue
+		}
 
-		allocatableMemory := float64(node.Status.Allocatable.Memory().Value())
-		capacityMemory := float64(node.Status.Capacity.Memory().Value())
+		cpuUsage := nodeMetric.Usage[corev1.ResourceCPU]
+		cpuPercentage := float64(cpuUsage.MilliValue()) / float64(node.Status.Capacity.Cpu().MilliValue())
 
-		cpuUsagePercent := (1.0 - (allocatableCPU / capacityCPU)) * 100.0
-		ramUsagePercent := (1.0 - (allocatableMemory / capacityMemory)) * 100.0
+		memoryUsage := nodeMetric.Usage[corev1.ResourceMemory]
+		memoryPercentage := float64(memoryUsage.Value()) / float64(node.Status.Capacity.Memory().Value())
 
 		hostIP := getHostIp(node)
 		if hostIP == "" {
@@ -147,8 +160,8 @@ func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
 		}
 
 		hostMap[hostIP] = &model.NodeMetrics{
-			CpuUsage: cpuUsagePercent,
-			RamUsage: ramUsagePercent,
+			CpuUsage: cpuPercentage,
+			RamUsage: memoryPercentage,
 		}
 	}
 

@@ -24,6 +24,7 @@ const defaultPingTimeout int = 1
 const defaultPingCacheTime int = 100
 const defaultQosRecalculationCooldownS = 60
 const defaultNewLatencyApprWeight float64 = 0.7
+const defaultMaxUsage float64 = 0.95
 
 const pingURLSuffix string = "/echo?param1=value1&param2=value2"
 
@@ -34,6 +35,8 @@ type Balancer struct {
 	qosPercentage             float64
 	qosRecalculationTime      map[string]time.Time
 	qosRecalculationCooldownS int
+
+	maxResUsage float64
 
 	latencyWeight         float64
 	latencyApprWeight     float64
@@ -62,6 +65,12 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		qosPercentage = defaultPercentageQoS
 	}
 	log.Println("QOS_PERC:", qosPercentage)
+
+	maxResUsage, err := strconv.ParseFloat(os.Getenv("MAX_RES_USAGE"), 64)
+	if err != nil {
+		maxResUsage = defaultMaxUsage
+	}
+	log.Println("MAX_RES_USAGE:", maxResUsage)
 
 	newLatencyWeight, err := strconv.ParseFloat(os.Getenv("LAT_WEIGHT"), 64)
 	if err != nil {
@@ -122,6 +131,7 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		cooldownBaseDurationS:     cooldownBaseDuration,
 		qosRecalculationCooldownS: qosRecalculationCooldownS,
 		qosRecalculationTime:      make(map[string]time.Time),
+		maxResUsage:               maxResUsage,
 		realDataPeriodS:           realDataPeriod,
 		pingPort:                  pingPort,
 		pingTimeout:               pingTimeout,
@@ -203,7 +213,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 
 		serviceStatus := b.hostLatency[pod.HostIP][service]
 		if serviceStatus.Latency < maxLatency {
-			if !skipNodeStatus && (nodeStatus[pod.HostIP].CpuUsage > 0.9 || nodeStatus[pod.HostIP].RamUsage > 0.9) {
+			if !skipNodeStatus && nodeStatus[pod.HostIP] != nil && (nodeStatus[pod.HostIP].CpuUsage > b.maxResUsage || nodeStatus[pod.HostIP].RamUsage > b.maxResUsage) {
 				overloadedPodsIPs = append(overloadedPodsIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
 			} else {
 				bestPodIPs = append(bestPodIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
