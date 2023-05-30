@@ -65,27 +65,27 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		newLatencyWeight = defaultNewLatencyWeight
 	}
 
-	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION"))
+	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION_S"))
 	if err != nil {
 		cooldownBaseDuration = defaultCooldownBaseDuration
 	}
 
-	realDataPeriod, err := strconv.Atoi(os.Getenv("REAL_DATA_VALID"))
+	realDataPeriod, err := strconv.Atoi(os.Getenv("REAL_DATA_VALID_S"))
 	if err != nil {
 		realDataPeriod = defaultRealDataPeriod
 	}
 
-	pingTimeout, err := strconv.Atoi(os.Getenv("PING_TIMEOUT"))
+	pingTimeout, err := strconv.Atoi(os.Getenv("PING_TIMEOUT_S"))
 	if err != nil {
 		pingTimeout = defaultPingTimeout
 	}
 
-	pingCacheTime, err := strconv.Atoi(os.Getenv("PING_CACHE_TIME"))
+	pingCacheTime, err := strconv.Atoi(os.Getenv("PING_CACHE_TIME_S"))
 	if err != nil {
 		pingTimeout = defaultPingCacheTime
 	}
 
-	qosRecalculationCooldownS, err := strconv.Atoi(os.Getenv("QOS_COOLDOWN"))
+	qosRecalculationCooldownS, err := strconv.Atoi(os.Getenv("QOS_COOLDOWN_S"))
 	if err != nil {
 		qosRecalculationCooldownS = defaultQosRecalculationCooldownS
 	}

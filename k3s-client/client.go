@@ -59,7 +59,7 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	}
 	log.Println("Cache time set to", cacheTime, "s")
 
-	nodesMetricsCacheTimeS, err := strconv.Atoi(os.Getenv("NODE_METRICS_CACHE_TIME"))
+	nodesMetricsCacheTimeS, err := strconv.Atoi(os.Getenv("NODE_METRICS_CACHE_TIME_S"))
 	if err != nil {
 		nodesMetricsCacheTimeS = defaultNodesMetricsCacheTimeS
 	}

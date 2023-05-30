@@ -127,8 +127,10 @@ func main() {
 		log.Fatal("Error while initializing k3s client ::", err.Error())
 		return
 	}
+	log.Println("Created k3s-client ::", k3sClient)
 
 	edgeBalancer = balancer.NewBalancer(k3sClient, ownIP, "30090")
+	log.Println("Created edge balancer ::", edgeBalancer)
 
 	reverseProxy := http.HandlerFunc(reverseProxyHandler)
 
