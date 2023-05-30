@@ -49,7 +49,7 @@ func forwardRequest(req *http.Request, originServerURL *url.URL, service string,
 }
 
 func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
-	log.Printf("[reverse proxy server] received request at: %s\n", time.Now())
+	log.Printf("\n\n[reverse proxy server] received request at: %s\n", time.Now())
 
 	service := strings.Split(req.Host, ".")[0]
 	originServerURL, hostIP := getOriginServer(service)

@@ -152,7 +152,10 @@ func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
 		}
 	}
 
-	log.Println("Returning host nodes status")
+	log.Println("Returning host nodes status ::")
+	for key, val := range hostMap {
+		log.Printf("%s: CPU=%v - RAM=%v\n", key, val.CpuUsage, val.RamUsage)
+	}
 
 	c.nodesStatus = hostMap
 	c.nodesTime = time.Now()

@@ -23,6 +23,7 @@ const defaultRealDataPeriod int = 360
 const defaultPingTimeout int = 1
 const defaultPingCacheTime int = 100
 const defaultQosRecalculationCooldownS = 60
+const defaultNewLatencyApprWeight float64 = 0.7
 
 const pingURLSuffix string = "/echo?param1=value1&param2=value2"
 
@@ -35,6 +36,7 @@ type Balancer struct {
 	qosRecalculationCooldownS int
 
 	latencyWeight         float64
+	latencyApprWeight     float64
 	realDataPeriodS       int
 	cooldownBaseDurationS int
 
@@ -66,6 +68,12 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		newLatencyWeight = defaultNewLatencyWeight
 	}
 	log.Println("LAT_WEIGHT:", newLatencyWeight)
+
+	newLatencyApprWeight, err := strconv.ParseFloat(os.Getenv("LAT_APPR_WEIGHT"), 64)
+	if err != nil {
+		newLatencyApprWeight = defaultNewLatencyApprWeight
+	}
+	log.Println("LAT_APPR_WEIGHT:", newLatencyApprWeight)
 
 	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION_S"))
 	if err != nil {
@@ -110,6 +118,7 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		k3sClient:                 k3sClient,
 		qosPercentage:             qosPercentage,
 		latencyWeight:             newLatencyWeight,
+		latencyApprWeight:         newLatencyApprWeight,
 		cooldownBaseDurationS:     cooldownBaseDuration,
 		qosRecalculationCooldownS: qosRecalculationCooldownS,
 		qosRecalculationTime:      make(map[string]time.Time),
@@ -272,7 +281,13 @@ func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
 		return
 	}
 
-	latencyHost[service].Latency = int((1-b.latencyWeight)*float64(latencyHost[service].Latency) + b.latencyWeight*float64(latency))
+	if latencyHost[service].IsApproximated {
+		log.Println("Last latency for service", service, "was approximated. Using weight ::", b.latencyApprWeight)
+		latencyHost[service].Latency = int((1-b.latencyApprWeight)*float64(latencyHost[service].Latency) + b.latencyApprWeight*float64(latency))
+	} else {
+		latencyHost[service].Latency = int((1-b.latencyWeight)*float64(latencyHost[service].Latency) + b.latencyWeight*float64(latency))
+	}
+
 	latencyHost[service].FailedReqCounter = 0
 	latencyHost[service].IsApproximated = false
 	latencyHost[service].IsServiceHealthy = true
@@ -410,7 +425,7 @@ func pingHost(hostUrl string, timeoutS int) int {
 		return -1
 	}
 
-	log.Println("GO: Host pinged! Result", time.Since(start))
+	log.Println("GO: Host", hostUrl, "pinged! Result", time.Since(start))
 
 	return int(time.Since(start).Milliseconds())
 }
