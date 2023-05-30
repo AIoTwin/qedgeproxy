@@ -127,16 +127,16 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 	}
 }
 
-func (b *Balancer) ChoosePod(namespace string, service string) (string, string) {
-	podsAll, annotations, err := b.k3sClient.GetPodsForService(namespace, service)
+func (b *Balancer) ChoosePod(namespace string, service string) (string, string, string) {
+	podsAll, annotations, targetPort, err := b.k3sClient.GetPodsForService(namespace, service)
 	if err != nil {
 		log.Println("Failed to retrieve pods for service :: ", err.Error())
-		return "", ""
+		return "", "", ""
 	}
 	pods := b.filterHealthyPods(podsAll, service)
 	if len(pods) == 0 {
 		log.Println("No pods found for service, returning nil ::", service)
-		return "", ""
+		return "", "", ""
 	}
 
 	log.Print("Filtered healthy pods :: ")
@@ -219,7 +219,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		index := rand.Intn(len(bestPodIPs))
 		if b.randomMode {
 			log.Println("Choosing a random Pod IP from the list that satisify QoS")
-			return bestPodIPs[index].IP, bestPodIPs[index].HostIP
+			return bestPodIPs[index].IP, bestPodIPs[index].HostIP, targetPort
 		} else {
 			sort.SliceStable(bestPodIPs, func(i, j int) bool {
 				return b.hostLatency[bestPodIPs[i].HostIP][service].Latency < b.hostLatency[bestPodIPs[j].HostIP][service].Latency
@@ -227,7 +227,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 
 			log.Println("Selected a pod based on Node resource usage and latency")
 
-			return bestPodIPs[0].IP, bestPodIPs[0].HostIP
+			return bestPodIPs[0].IP, bestPodIPs[0].HostIP, targetPort
 		}
 	}
 
@@ -235,14 +235,14 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 	for _, pod := range pods {
 		if b.ownIP == pod.HostIP {
 			log.Println("None satisfy the QoS, try to route to local")
-			return pod.IP, pod.HostIP
+			return pod.IP, pod.HostIP, targetPort
 		}
 	}
 
 	log.Println("Other routing roules failed, routing random")
 	// all else fails, revert to random
 	index := rand.Intn(len(pods))
-	return pods[index].IP, pods[index].HostIP
+	return pods[index].IP, pods[index].HostIP, targetPort
 }
 
 func (b *Balancer) SetLatency(hostIP string, latency int, service string) {

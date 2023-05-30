@@ -75,10 +75,10 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	}, nil
 }
 
-func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, error) {
+func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, string, error) {
 	if c.podCache[serviceName] != nil && int(time.Since(c.podCache[serviceName].CacheTime).Seconds()) < c.cacheTimeS {
 		log.Println("Returning cached data for service", serviceName)
-		return c.podCache[serviceName].Pods, c.podCache[serviceName].Annotations, nil
+		return c.podCache[serviceName].Pods, c.podCache[serviceName].Annotations, c.podCache[serviceName].TargetPort, nil
 	}
 
 	podList := make([]*model.PodInfo, 0)
@@ -86,16 +86,17 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	service, err := c.clientset.CoreV1().Services(namespace).Get(context.Background(), serviceName, metav1.GetOptions{})
 	if err != nil {
 		log.Printf("Failed to get service %s: %v\n", serviceName, err)
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
+	targetPort := service.Spec.Ports[0].TargetPort.StrVal
 	annotations := service.Annotations
 
 	podSelector := &metav1.LabelSelector{MatchLabels: service.Spec.Selector}
 	pods, err := c.clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(podSelector)})
 	if err != nil {
 		log.Printf("Failed to list pods for service %s: %v\n", serviceName, err)
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	for _, pod := range pods.Items {
@@ -109,10 +110,11 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	c.podCache[serviceName].Pods = podList
 	c.podCache[serviceName].Annotations = annotations
 	c.podCache[serviceName].CacheTime = time.Now()
+	c.podCache[serviceName].TargetPort = targetPort
 
 	log.Println("Adjusting pods cache ::", serviceName)
 
-	return podList, annotations, nil
+	return podList, annotations, targetPort, nil
 }
 
 func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {

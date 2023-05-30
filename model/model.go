@@ -36,4 +36,5 @@ type PodInfoCache struct {
 	Pods        []*PodInfo
 	Annotations map[string]string
 	PodSelector *metav1.LabelSelector
+	TargetPort  string
 }

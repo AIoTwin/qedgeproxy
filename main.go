@@ -22,14 +22,14 @@ var ownIP string
 var namespace string
 
 func getOriginServer(service string) (*url.URL, string) {
-	selectedIP, hostIP := edgeBalancer.ChoosePod(namespace, service)
+	selectedIP, hostIP, targetPort := edgeBalancer.ChoosePod(namespace, service)
 	if selectedIP == "" {
 		return nil, ""
 	}
 
 	log.Println("Selected pod IP ::", selectedIP)
 
-	originServerURL, err := url.Parse("http://" + selectedIP + "/") //url.Parse("http://localhost:3000/")
+	originServerURL, err := url.Parse("http://" + selectedIP + ":" + targetPort + "/") //url.Parse("http://localhost:3000/")
 	if err != nil {
 		log.Println("Invalid origin server URL")
 		return nil, ""
