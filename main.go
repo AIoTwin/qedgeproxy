@@ -31,7 +31,7 @@ func getOriginServer(service string) (*url.URL, string) {
 
 	originServerURL, err := url.Parse("http://localhost:3000/") //url.Parse("http://" + selectedIP + "/")
 	if err != nil {
-		log.Fatal("Invalid origin server URL")
+		log.Println("Invalid origin server URL")
 		return nil, ""
 	}
 

@@ -130,6 +130,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		log.Println("No pods found for service, returning nil ::", service)
 		return "", ""
 	}
+	log.Println("Filtered healthy pods ::", pods)
 
 	maxVal, err := strconv.Atoi(annotations["maxLatency"])
 	if err != nil {
@@ -155,6 +156,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 			if ok {
 				b.approxRunning[service].Store(false)
 				b.adjustLatencies(service, x)
+				log.Println("Adjusted latencies for service ::", service)
 			} else {
 				log.Println("Channel closed for service", service)
 			}
@@ -188,16 +190,16 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		}
 	}
 
-	// if there are no good pod IPs with good latency, send to overloaded ones
-	if len(bestPodIPs) == 0 {
-		bestPodIPs = overloadedPodsIPs
-	}
-
 	// not enough QoS pods, recalculate!
 	if !b.checkQoSMin(len(pods), len(bestPodIPs)+len(overloadedPodsIPs)) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
 		log.Println("QoS Min check failed! Running approximation again")
 		b.qosRecalculationTime[service] = time.Now()
 		go b.ApproximateLatency(podsAll, service, maxLatency)
+	}
+
+	// if there are no good pod IPs with good latency, send to overloaded ones
+	if len(bestPodIPs) == 0 {
+		bestPodIPs = overloadedPodsIPs
 	}
 
 	// select a random pod from pods that satisfy QoS
@@ -315,8 +317,9 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 		}
 
 		hostLatency[pod.HostIP] = &model.HostData{
-			Latency:        latency,
-			IsApproximated: true,
+			Latency:          latency,
+			IsApproximated:   true,
+			IsServiceHealthy: true,
 		}
 
 	}
@@ -343,7 +346,10 @@ func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData)
 }
 
 func (b *Balancer) checkQoSMin(podNum int, goodPodsNum int) bool {
-	return float64(goodPodsNum)/float64(podNum) >= b.qosPercentage
+	validQosMin := float64(goodPodsNum)/float64(podNum) >= b.qosPercentage
+	log.Println("Check if QoS Min is satisifed ::", validQosMin)
+
+	return validQosMin
 }
 
 func (b *Balancer) isServiceInTimeout(serviceStatus *model.HostData) bool {
@@ -372,13 +378,13 @@ func pingHost(hostUrl string, timeoutS int) int {
 
 	request, err := http.NewRequest("GET", hostUrl, nil)
 	if err != nil {
-		log.Fatal("Error creating GET request:", err.Error())
+		log.Println("Error creating GET request:", err.Error())
 		return -1
 	}
 
 	response, err := client.Do(request)
 	if err != nil {
-		log.Fatal("Error sending GET request:", err.Error())
+		log.Println("Error sending GET request:", err.Error())
 		return -1
 	}
 	defer response.Body.Close()
@@ -386,7 +392,7 @@ func pingHost(hostUrl string, timeoutS int) int {
 	// Read the response body
 	_, err = ioutil.ReadAll(response.Body)
 	if err != nil {
-		log.Fatal("Error reading response body:", err.Error())
+		log.Println("Error reading response body:", err.Error())
 		return -1
 	}
 
