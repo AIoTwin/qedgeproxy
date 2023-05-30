@@ -29,7 +29,7 @@ func getOriginServer(service string) (*url.URL, string) {
 
 	log.Println("Selected pod IP ::", selectedIP)
 
-	originServerURL, err := url.Parse("http://localhost:3000/") //url.Parse("http://" + selectedIP + "/")
+	originServerURL, err := url.Parse("http://" + selectedIP + "/") //url.Parse("http://localhost:3000/")
 	if err != nil {
 		log.Println("Invalid origin server URL")
 		return nil, ""
@@ -127,10 +127,8 @@ func main() {
 		log.Fatal("Error while initializing k3s client ::", err.Error())
 		return
 	}
-	log.Println("Created k3s-client ::", k3sClient)
 
 	edgeBalancer = balancer.NewBalancer(k3sClient, ownIP, "30090")
-	log.Println("Created edge balancer ::", edgeBalancer)
 
 	reverseProxy := http.HandlerFunc(reverseProxyHandler)
 

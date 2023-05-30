@@ -59,41 +59,49 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 	if err != nil {
 		qosPercentage = defaultPercentageQoS
 	}
+	log.Println("QOS_PERC:", qosPercentage)
 
 	newLatencyWeight, err := strconv.ParseFloat(os.Getenv("LAT_WEIGHT"), 64)
 	if err != nil {
 		newLatencyWeight = defaultNewLatencyWeight
 	}
+	log.Println("LAT_WEIGHT:", newLatencyWeight)
 
 	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION_S"))
 	if err != nil {
 		cooldownBaseDuration = defaultCooldownBaseDuration
 	}
+	log.Println("COOLDOWN_BASE_DURATION_S:", cooldownBaseDuration)
 
 	realDataPeriod, err := strconv.Atoi(os.Getenv("REAL_DATA_VALID_S"))
 	if err != nil {
 		realDataPeriod = defaultRealDataPeriod
 	}
+	log.Println("REAL_DATA_VALID_S:", realDataPeriod)
 
 	pingTimeout, err := strconv.Atoi(os.Getenv("PING_TIMEOUT_S"))
 	if err != nil {
 		pingTimeout = defaultPingTimeout
 	}
+	log.Println("PING_TIMEOUT_S:", pingTimeout)
 
 	pingCacheTime, err := strconv.Atoi(os.Getenv("PING_CACHE_TIME_S"))
 	if err != nil {
-		pingTimeout = defaultPingCacheTime
+		pingCacheTime = defaultPingCacheTime
 	}
+	log.Println("PING_CACHE_TIME_S:", pingCacheTime)
 
 	qosRecalculationCooldownS, err := strconv.Atoi(os.Getenv("QOS_COOLDOWN_S"))
 	if err != nil {
 		qosRecalculationCooldownS = defaultQosRecalculationCooldownS
 	}
+	log.Println("QOS_COOLDOWN_S:", qosRecalculationCooldownS)
 
 	randomMode, err := strconv.ParseBool(os.Getenv("RANDOM_MODE"))
 	if err != nil {
 		randomMode = true
 	}
+	log.Println("RANDOM_MODE:", randomMode)
 
 	channels := make(map[string]chan map[string]*model.HostData)
 
@@ -130,7 +138,11 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 		log.Println("No pods found for service, returning nil ::", service)
 		return "", ""
 	}
-	log.Println("Filtered healthy pods ::", pods)
+
+	log.Print("Filtered healthy pods :: ")
+	for _, pd := range pods {
+		log.Print(pd.HostIP, " ", pd.IP)
+	}
 
 	maxVal, err := strconv.Atoi(annotations["maxLatency"])
 	if err != nil {
@@ -213,7 +225,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string) 
 				return b.hostLatency[bestPodIPs[i].HostIP][service].Latency < b.hostLatency[bestPodIPs[j].HostIP][service].Latency
 			})
 
-			log.Println("Selected a random pod based on Node resource usage and latency")
+			log.Println("Selected a pod based on Node resource usage and latency")
 
 			return bestPodIPs[0].IP, bestPodIPs[0].HostIP
 		}
@@ -291,7 +303,7 @@ func (b *Balancer) SetReqFailed(hostIP string, service string) {
 
 func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, maxLatency int) {
 	hostLatency := make(map[string]*model.HostData)
-	log.Println("Approximating latency for service", service)
+	log.Println("GO: Approximating latency for service", service)
 
 	for _, pod := range pods {
 		var latency int
@@ -302,7 +314,7 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 
 		if val, ok := b.hostPingCache[pod.HostIP]; ok && int(time.Since(val.CacheTime).Seconds()) < b.pingCacheTime {
 			latency = val.Latency
-			log.Println("Using cached latency for host", pod.HostIP)
+			log.Println("GO: Using cached latency for host", pod.HostIP)
 		} else {
 			latency = pingHost("http://"+pod.HostIP+":"+b.pingPort+pingURLSuffix, b.pingTimeout)
 
@@ -339,7 +351,7 @@ func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData)
 		if b.hostLatency[k][service] == nil {
 			b.hostLatency[k][service] = v
 		} else {
-			if int(time.Since(b.hostLatency[k][service].ReqTime).Seconds()) < b.realDataPeriodS || b.hostLatency[k][service].IsApproximated {
+			if int(time.Since(b.hostLatency[k][service].ReqTime).Seconds()) > b.realDataPeriodS || b.hostLatency[k][service].IsApproximated {
 				b.hostLatency[k][service].Latency = v.Latency
 				b.hostLatency[k][service].IsApproximated = v.IsApproximated
 			}
@@ -380,13 +392,13 @@ func pingHost(hostUrl string, timeoutS int) int {
 
 	request, err := http.NewRequest("GET", hostUrl, nil)
 	if err != nil {
-		log.Println("Error creating GET request:", err.Error())
+		log.Println("GO: Error creating GET request:", err.Error())
 		return -1
 	}
 
 	response, err := client.Do(request)
 	if err != nil {
-		log.Println("Error sending GET request:", err.Error())
+		log.Println("GO: Error sending GET request:", err.Error())
 		return -1
 	}
 	defer response.Body.Close()
@@ -394,11 +406,11 @@ func pingHost(hostUrl string, timeoutS int) int {
 	// Read the response body
 	_, err = ioutil.ReadAll(response.Body)
 	if err != nil {
-		log.Println("Error reading response body:", err.Error())
+		log.Println("GO: Error reading response body:", err.Error())
 		return -1
 	}
 
-	log.Println("Host pinged! Result", time.Since(start))
+	log.Println("GO: Host pinged! Result", time.Since(start))
 
 	return int(time.Since(start).Milliseconds())
 }

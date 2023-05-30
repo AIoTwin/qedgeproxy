@@ -57,12 +57,13 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	if err != nil {
 		cacheTime = defaultCacheTimeS
 	}
-	log.Println("Cache time set to", cacheTime, "s")
+	log.Println("CACHE_TIME_S:", cacheTime)
 
 	nodesMetricsCacheTimeS, err := strconv.Atoi(os.Getenv("NODE_METRICS_CACHE_TIME_S"))
 	if err != nil {
 		nodesMetricsCacheTimeS = defaultNodesMetricsCacheTimeS
 	}
+	log.Println("NODE_METRICS_CACHE_TIME_S:", nodesMetricsCacheTimeS)
 
 	return &K3sClient{
 		config:           config,
@@ -109,7 +110,7 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	c.podCache[serviceName].Annotations = annotations
 	c.podCache[serviceName].CacheTime = time.Now()
 
-	log.Println("Adjusting pods cache")
+	log.Println("Adjusting pods cache ::", serviceName)
 
 	return podList, annotations, nil
 }
@@ -149,7 +150,7 @@ func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
 		}
 	}
 
-	log.Println("Returning host status ::", hostMap)
+	log.Println("Returning host nodes status")
 
 	c.nodesStatus = hostMap
 	c.nodesTime = time.Now()
