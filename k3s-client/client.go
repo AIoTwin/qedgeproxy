@@ -89,7 +89,7 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 		return nil, nil, "", err
 	}
 
-	targetPort := service.Spec.Ports[0].TargetPort.StrVal
+	targetPort := strconv.Itoa(int(service.Spec.Ports[0].TargetPort.IntVal))
 	annotations := service.Annotations
 
 	podSelector := &metav1.LabelSelector{MatchLabels: service.Spec.Selector}

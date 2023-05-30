@@ -27,9 +27,9 @@ func getOriginServer(service string) (*url.URL, string) {
 		return nil, ""
 	}
 
-	log.Println("Selected pod IP ::", selectedIP)
+	log.Println("Selected pod IP ::", selectedIP+":"+targetPort)
 
-	originServerURL, err := url.Parse("http://" + selectedIP + ":" + targetPort + "/") //url.Parse("http://localhost:3000/")
+	originServerURL, err := url.Parse("http://" + selectedIP + ":" + targetPort + "/")
 	if err != nil {
 		log.Println("Invalid origin server URL")
 		return nil, ""
