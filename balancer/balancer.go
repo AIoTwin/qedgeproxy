@@ -244,7 +244,7 @@ func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
 			FailedReqCounter: 0,
 			ReqTime:          time.Now(),
 		}
-		log.Println("Adjust latency data for |", hostIP, service, "| => |", b.hostLatency[hostIP][service], "|")
+		log.Println("Adjust latency data for |", hostIP, service, latency, "| => |", b.hostLatency[hostIP][service], "|")
 		return
 	}
 
@@ -256,17 +256,17 @@ func (b *Balancer) SetLatency(hostIP string, latency int, service string) {
 			FailedReqCounter: 0,
 			ReqTime:          time.Now(),
 		}
-		log.Println("Adjust latency data for |", hostIP, service, "| => |", b.hostLatency[hostIP][service], "|")
+		log.Println("Adjust latency data for |", hostIP, service, latency, "| => |", b.hostLatency[hostIP][service], "|")
 		return
 	}
 
-	latencyHost[service].Latency = int((1-b.latencyWeight)*float64(latencyHost[service].Latency) + b.latencyWeight*float64(latencyHost[service].Latency))
+	latencyHost[service].Latency = int((1-b.latencyWeight)*float64(latencyHost[service].Latency) + b.latencyWeight*float64(latency))
 	latencyHost[service].FailedReqCounter = 0
 	latencyHost[service].IsApproximated = false
 	latencyHost[service].IsServiceHealthy = true
 	latencyHost[service].ReqTime = time.Now()
 
-	log.Println("Adjust latency data for |", hostIP, service, "| => |", latencyHost[service], "|")
+	log.Println("Adjust latency data for |", hostIP, service, latency, "| => |", latencyHost[service], "|")
 }
 
 func (b *Balancer) SetReqFailed(hostIP string, service string) {
@@ -320,6 +320,8 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 			Latency:          latency,
 			IsApproximated:   true,
 			IsServiceHealthy: true,
+			FailedReqCounter: 0,
+			ReqTime:          time.Now(),
 		}
 
 	}
