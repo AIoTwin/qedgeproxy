@@ -214,6 +214,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 		serviceStatus := b.hostLatency[pod.HostIP][service]
 		if serviceStatus.Latency < maxLatency {
 			if !skipNodeStatus && nodeStatus[pod.HostIP] != nil && (nodeStatus[pod.HostIP].CpuUsage > b.maxResUsage || nodeStatus[pod.HostIP].RamUsage > b.maxResUsage) {
+				log.Println(pod.HostIP, "is overloaded, skipping pod", pod.IP)
 				overloadedPodsIPs = append(overloadedPodsIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
 			} else {
 				bestPodIPs = append(bestPodIPs, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
@@ -230,6 +231,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 
 	// if there are no good pod IPs with good latency, send to overloaded ones
 	if len(bestPodIPs) == 0 {
+		log.Println("No not overloaded pods available, using overloaded ones.")
 		bestPodIPs = overloadedPodsIPs
 	}
 
