@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type PodInfo struct {
@@ -35,6 +33,5 @@ type PodInfoCache struct {
 	CacheTime   time.Time
 	Pods        []*PodInfo
 	Annotations map[string]string
-	PodSelector *metav1.LabelSelector
 	TargetPort  string
 }

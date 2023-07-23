@@ -206,8 +206,10 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 		skipNodeStatus = true
 	}
 
+	newPodDetected := false
 	for _, pod := range pods {
 		if b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil {
+			newPodDetected = true
 			continue
 		}
 
@@ -223,7 +225,7 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 	}
 
 	// not enough QoS pods, recalculate!
-	if !b.checkQoSMin(len(pods), len(bestPodIPs)+len(overloadedPodsIPs)) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
+	if (!b.checkQoSMin(len(pods), len(bestPodIPs)+len(overloadedPodsIPs)) || newPodDetected) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
 		log.Println("QoS Min check failed! Running approximation again")
 		b.qosRecalculationTime[service] = time.Now()
 		go b.ApproximateLatency(podsAll, service, maxLatency)
