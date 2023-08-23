@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/robfig/cron/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -22,7 +24,7 @@ import (
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
-const defaultCacheTimeS int = 20
+const defaultcacheHoldTimeS int = 360
 const defaultNodesMetricsCacheTimeS = 60
 
 type K3sClient struct {
@@ -33,11 +35,13 @@ type K3sClient struct {
 
 	nodesStatus    map[string]*model.NodeMetrics
 	nodesCacheTime int
-	nodesTime      time.Time
 
-	serviceListener map[string]chan struct{}
+	serviceMaintainerMap map[string]*model.MaintainerData
 
-	cacheTimeS int
+	cacheHoldTimeS int
+
+	cacheMutex    *sync.RWMutex
+	cronScheduler *cron.Cron
 }
 
 func NewSK3sClient(configFilePath string) (*K3sClient, error) {
@@ -60,11 +64,11 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 		return nil, err
 	}
 
-	cacheTime, err := strconv.Atoi(os.Getenv("CACHE_TIME_S"))
+	cacheHoldTimeS, err := strconv.Atoi(os.Getenv("CACHE_HOLD_TIME_S"))
 	if err != nil {
-		cacheTime = defaultCacheTimeS
+		cacheHoldTimeS = defaultcacheHoldTimeS
 	}
-	log.Println("CACHE_TIME_S:", cacheTime)
+	log.Println("CACHE_HOLD_TIME_S:", cacheHoldTimeS)
 
 	nodesMetricsCacheTimeS, err := strconv.Atoi(os.Getenv("NODE_METRICS_CACHE_TIME_S"))
 	if err != nil {
@@ -72,20 +76,27 @@ func NewSK3sClient(configFilePath string) (*K3sClient, error) {
 	}
 	log.Println("NODE_METRICS_CACHE_TIME_S:", nodesMetricsCacheTimeS)
 
-	return &K3sClient{
-		config:           config,
-		clientset:        clientset,
-		metricsClientset: metricsClientset,
-		podCache:         &sync.Map{},
-		serviceListener:  make(map[string]chan struct{}, 0),
-		nodesCacheTime:   nodesMetricsCacheTimeS,
-		cacheTimeS:       cacheTime,
-	}, nil
+	client := &K3sClient{
+		config:               config,
+		clientset:            clientset,
+		metricsClientset:     metricsClientset,
+		podCache:             &sync.Map{},
+		serviceMaintainerMap: make(map[string]*model.MaintainerData),
+		nodesCacheTime:       nodesMetricsCacheTimeS,
+		cacheHoldTimeS:       cacheHoldTimeS,
+		cacheMutex:           &sync.RWMutex{},
+	}
+	client.startNodeStatusInfoRefresher()
+	client.startPodInfoMaintainer()
+
+	return client, nil
 }
 
 func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*model.PodInfo, map[string]string, string, error) {
 	if cached, found := c.podCache.Load(serviceName); found {
 		cachedData := cached.(*model.PodInfoCache)
+
+		c.serviceMaintainerMap[serviceName].LastRequestTime = time.Now()
 
 		log.Println("Returning cached data for service", serviceName)
 		return cachedData.Pods, cachedData.Annotations, cachedData.TargetPort, nil
@@ -98,25 +109,42 @@ func (c *K3sClient) GetPodsForService(namespace string, serviceName string) ([]*
 	}
 
 	defer c.startListener(namespace, serviceName, labels.Set(service.Spec.Selector).AsSelector())
-	return c.callKubePodApi(namespace, serviceName, service)
+	return c.initService(namespace, serviceName, service)
 }
 
 func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
-	if c.nodesStatus != nil && int(time.Since(c.nodesTime).Seconds()) < c.nodesCacheTime {
-		log.Println("Using node status cache")
-		return c.nodesStatus, nil
+	if c.nodesStatus != nil {
+		c.cacheMutex.RLock()
+		defer c.cacheMutex.RUnlock()
+
+		returnValue := c.createNodeStatusMapCopy()
+
+		return returnValue, nil
 	}
 
+	return nil, fmt.Errorf("Nodes status map is not initialized")
+}
+
+func (c *K3sClient) startNodeStatusInfoRefresher() {
+	c.refreshNodesStatusInfo()
+
+	c.cronScheduler = cron.New(cron.WithSeconds())
+	_, _ = c.cronScheduler.AddFunc(fmt.Sprintf("@every %ds", c.nodesCacheTime), c.refreshNodesStatusInfo)
+
+	c.cronScheduler.Start()
+}
+
+func (c *K3sClient) refreshNodesStatusInfo() {
 	nodes, err := c.clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		log.Println("Failed to retrieve nodes on node status")
-		return nil, err
+		return
 	}
 
 	nodeMetricsList, err := c.metricsClientset.MetricsV1beta1().NodeMetricses().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		log.Println("Failed to retrieve node metrices on node status")
-		return nil, err
+		return
 	}
 
 	nodeMetricsMap := make(map[string]v1beta1.NodeMetrics)
@@ -148,18 +176,40 @@ func (c *K3sClient) GetNodesStatus() (map[string]*model.NodeMetrics, error) {
 		}
 	}
 
-	log.Println("Returning host nodes status ::")
+	log.Println("Refreshed host nodes status ::")
 	for key, val := range hostMap {
 		log.Printf("%s: CPU=%v - RAM=%v\n", key, val.CpuUsage, val.RamUsage)
 	}
 
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
 	c.nodesStatus = hostMap
-	c.nodesTime = time.Now()
-
-	return hostMap, nil
 }
 
-func (c *K3sClient) callKubePodApi(namespace string, serviceName string, service *corev1.Service) ([]*model.PodInfo, map[string]string, string, error) {
+func (c *K3sClient) startPodInfoMaintainer() {
+	c.cronScheduler = cron.New(cron.WithSeconds())
+	_, _ = c.cronScheduler.AddFunc("@every 60s", c.maintainServiceInfo)
+
+	c.cronScheduler.Start()
+}
+
+func (c *K3sClient) maintainServiceInfo() {
+	var clearedServices []string
+	for serviceName, maintenanceData := range c.serviceMaintainerMap {
+		if time.Since(maintenanceData.LastRequestTime).Seconds() > float64(c.cacheHoldTimeS) {
+			close(maintenanceData.Channel)
+			c.podCache.Delete(serviceName)
+
+			clearedServices = append(clearedServices, serviceName)
+		}
+	}
+
+	for _, serviceName := range clearedServices {
+		delete(c.serviceMaintainerMap, serviceName)
+	}
+}
+
+func (c *K3sClient) initService(namespace string, serviceName string, service *corev1.Service) ([]*model.PodInfo, map[string]string, string, error) {
 	podList := make([]*model.PodInfo, 0)
 
 	targetPort := strconv.Itoa(int(service.Spec.Ports[0].TargetPort.IntVal))
@@ -179,12 +229,15 @@ func (c *K3sClient) callKubePodApi(namespace string, serviceName string, service
 	cacheData := &model.PodInfoCache{
 		Pods:        podList,
 		Annotations: annotations,
-		CacheTime:   time.Now(),
 		TargetPort:  targetPort,
 	}
 
 	c.podCache.Store(serviceName, cacheData)
 	log.Println("Manually updated pods cache for service:", serviceName)
+
+	c.serviceMaintainerMap[serviceName] = &model.MaintainerData{
+		LastRequestTime: time.Now(),
+	}
 
 	return podList, annotations, targetPort, nil
 }
@@ -217,7 +270,7 @@ func (c *K3sClient) startListener(namespace string, serviceName string, labelSel
 	)
 
 	stopCh := make(chan struct{})
-	c.serviceListener[serviceName] = stopCh
+	c.serviceMaintainerMap[serviceName].Channel = stopCh
 
 	go controller.Run(stopCh)
 }
@@ -243,6 +296,14 @@ func (c *K3sClient) onPodAdd(obj interface{}, serviceName string) {
 	pod := obj.(*corev1.Pod)
 	podCache, _ := c.podCache.Load(serviceName)
 
+	podIndex := indexOfPods(podCache.(*model.PodInfoCache).Pods, func(p *model.PodInfo) bool {
+		return p.Name == pod.Name
+	})
+
+	if podIndex != -1 {
+		return
+	}
+
 	adjustedPods := append(podCache.(*model.PodInfoCache).Pods, &model.PodInfo{Name: pod.Name, Namespace: pod.Namespace, IP: pod.Status.PodIP, HostIP: pod.Status.HostIP})
 	podCache.(*model.PodInfoCache).Pods = adjustedPods
 	c.podCache.Store(serviceName, podCache)
@@ -257,6 +318,14 @@ func (c *K3sClient) onPodDelete(obj interface{}, serviceName string) {
 	})
 	podCache.(*model.PodInfoCache).Pods = filteredPods
 	c.podCache.Store(serviceName, podCache)
+}
+
+func (c *K3sClient) createNodeStatusMapCopy() map[string]*model.NodeMetrics {
+	copiedMap := make(map[string]*model.NodeMetrics, len(c.nodesStatus))
+	for key, val := range c.nodesStatus {
+		copiedMap[key] = val
+	}
+	return copiedMap
 }
 
 func filterPods(pods []*model.PodInfo, condition func(*model.PodInfo) bool) []*model.PodInfo {

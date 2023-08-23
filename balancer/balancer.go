@@ -201,8 +201,8 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 	skipNodeStatus := false
 
 	nodeStatus, err := b.k3sClient.GetNodesStatus()
-	if err != nil {
-		log.Println("Failed retrieving node status ::", nodeStatus)
+	if nodeStatus == nil || err != nil {
+		log.Println("Failed retrieving node status ::", err)
 		skipNodeStatus = true
 	}
 

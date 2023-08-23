@@ -30,8 +30,12 @@ type PingCache struct {
 }
 
 type PodInfoCache struct {
-	CacheTime   time.Time
 	Pods        []*PodInfo
 	Annotations map[string]string
 	TargetPort  string
+}
+
+type MaintainerData struct {
+	Channel         chan struct{}
+	LastRequestTime time.Time
 }
