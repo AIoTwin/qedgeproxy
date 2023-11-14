@@ -3,6 +3,7 @@ package balancer
 import (
 	"io/ioutil"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -25,6 +26,9 @@ const defaultPingCacheTime int = 100
 const defaultQosRecalculationCooldownS = 60
 const defaultNewLatencyApprWeight float64 = 0.7
 const defaultMaxUsage float64 = 0.95
+
+const alpha float64 = 0.8
+const proximityMode bool = true
 
 const pingURLSuffix string = "/echo?param1=value1&param2=value2"
 
@@ -196,6 +200,32 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 		}
 	}
 
+	if proximityMode {
+		randValue := rand.Float64()
+		weightSum := 0.0
+
+		var weightPods []model.PodInfo
+		for _, pod := range podsAll {
+			if (b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
+				b.qosRecalculationTime[service] = time.Now()
+				go b.ApproximateLatency(podsAll, service, maxLatency)
+			} else {
+				weightPods = append(weightPods, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
+			}
+		}
+
+		for k, v := range b.hostLatency {
+			weightSum += v[service].Weight
+			if randValue < weightSum {
+				for _, wp := range weightPods {
+					if wp.HostIP == k {
+						return wp.IP, wp.HostIP, targetPort
+					}
+				}
+			}
+		}
+	}
+
 	var bestPodIPs []model.PodInfo
 	var overloadedPodsIPs []model.PodInfo
 	skipNodeStatus := false
@@ -357,6 +387,10 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 			}
 		}
 
+		if latency < 3 {
+			latency = 3
+		}
+
 		hostLatency[pod.HostIP] = &model.HostData{
 			Latency:          latency,
 			IsApproximated:   true,
@@ -367,8 +401,24 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 
 	}
 
+	b.proximityLatencyWeight(hostLatency)
+
 	// new latencies calculated, give it to the main thread
 	b.channels[service] <- hostLatency
+}
+
+func (b *Balancer) proximityLatencyWeight(latencies map[string]*model.HostData) {
+	var weightSum float64 = 0
+	numOfPods := 0
+	for _, v := range latencies {
+		v.Weight = math.Exp(-float64(v.Latency) / 2)
+		weightSum += v.Weight
+		numOfPods++
+	}
+
+	for _, v := range latencies {
+		v.Weight = ((1 - alpha) / float64(numOfPods)) + (alpha * (v.Weight / weightSum))
+	}
 }
 
 func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData) {

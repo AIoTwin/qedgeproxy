@@ -22,6 +22,7 @@ type HostData struct {
 	IsServiceHealthy bool
 	ReqTime          time.Time
 	FailedReqCounter int
+	Weight           float64
 }
 
 type PingCache struct {

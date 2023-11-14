@@ -60,7 +60,7 @@ func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// get the response from the origin server
-	start := time.Now()
+	//start := time.Now()
 	originServerResponse, err := forwardRequest(req, originServerURL, service, hostIP)
 	if err != nil {
 		edgeBalancer.SetReqFailed(hostIP, service)
@@ -68,7 +68,7 @@ func reverseProxyHandler(rw http.ResponseWriter, req *http.Request) {
 		_, _ = fmt.Fprint(rw, err)
 		return
 	}
-	edgeBalancer.SetLatency(hostIP, int(time.Since(start).Milliseconds()), service)
+	//edgeBalancer.SetLatency(hostIP, int(time.Since(start).Milliseconds()), service)
 
 	// return response to the client
 	rw.WriteHeader(http.StatusOK)
