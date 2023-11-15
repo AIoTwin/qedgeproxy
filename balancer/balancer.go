@@ -410,7 +410,11 @@ func (b *Balancer) ApproximateLatency(pods []*model.PodInfo, service string, max
 func (b *Balancer) proximityLatencyWeight(latencies map[string]*model.HostData) {
 	var weightSum float64 = 0
 	numOfPods := 0
-	for _, v := range latencies {
+
+	log.Println("Calculating weight from following latencies ::")
+	for k, v := range latencies {
+		log.Println(k, "::", v.Latency)
+
 		v.Weight = math.Exp(-float64(v.Latency) / 2)
 		weightSum += v.Weight
 		numOfPods++
