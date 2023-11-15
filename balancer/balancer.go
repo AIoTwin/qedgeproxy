@@ -420,8 +420,11 @@ func (b *Balancer) proximityLatencyWeight(latencies map[string]*model.HostData) 
 		numOfPods++
 	}
 
-	for _, v := range latencies {
+	log.Println("Calculated weights ::")
+	for k, v := range latencies {
 		v.Weight = ((1 - alpha) / float64(numOfPods)) + (alpha * (v.Weight / weightSum))
+
+		log.Println(k, "::", v.Weight)
 	}
 }
 
