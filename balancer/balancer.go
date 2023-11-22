@@ -27,7 +27,7 @@ const defaultQosRecalculationCooldownS = 60
 const defaultNewLatencyApprWeight float64 = 0.7
 const defaultMaxUsage float64 = 0.95
 
-const alpha float64 = 0.8
+const defaultAlpha float64 = 0.8
 const proximityMode bool = true
 
 const pingURLSuffix string = "/echo?param1=value1&param2=value2"
@@ -39,6 +39,8 @@ type Balancer struct {
 	qosPercentage             float64
 	qosRecalculationTime      map[string]time.Time
 	qosRecalculationCooldownS int
+
+	alpha float64
 
 	maxResUsage float64
 
@@ -87,6 +89,12 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		newLatencyApprWeight = defaultNewLatencyApprWeight
 	}
 	log.Println("LAT_APPR_WEIGHT:", newLatencyApprWeight)
+
+	alpha, err := strconv.ParseFloat(os.Getenv("ALPHA"), 64)
+	if err != nil {
+		alpha = defaultAlpha
+	}
+	log.Println("ALPHA:", alpha)
 
 	cooldownBaseDuration, err := strconv.Atoi(os.Getenv("COOLDOWN_BASE_DURATION_S"))
 	if err != nil {
@@ -141,6 +149,7 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		pingTimeout:               pingTimeout,
 		pingCacheTime:             pingCacheTime,
 		randomMode:                randomMode,
+		alpha:                     alpha,
 		hostPingCache:             make(map[string]*model.PingCache),
 		hostLatency:               make(map[string]map[string]*model.HostData),
 		serviceInit:               make(map[string]bool),
@@ -422,7 +431,7 @@ func (b *Balancer) proximityLatencyWeight(latencies map[string]*model.HostData) 
 
 	log.Println("Calculated weights ::")
 	for k, v := range latencies {
-		v.Weight = ((1 - alpha) / float64(numOfPods)) + (alpha * (v.Weight / weightSum))
+		v.Weight = ((1 - b.alpha) / float64(numOfPods)) + (b.alpha * (v.Weight / weightSum))
 
 		log.Println(k, "::", v.Weight)
 	}
