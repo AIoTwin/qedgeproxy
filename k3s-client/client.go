@@ -318,6 +318,8 @@ func (c *K3sClient) onPodDelete(obj interface{}, serviceName string) {
 	})
 	podCache.(*model.PodInfoCache).Pods = filteredPods
 	c.podCache.Store(serviceName, podCache)
+
+	log.Println("DEL POD ::", pod.Name)
 }
 
 func (c *K3sClient) createNodeStatusMapCopy() map[string]*model.NodeMetrics {

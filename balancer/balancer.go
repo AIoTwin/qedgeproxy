@@ -26,6 +26,7 @@ const defaultPingCacheTime int = 100
 const defaultQosRecalculationCooldownS = 60
 const defaultNewLatencyApprWeight float64 = 0.7
 const defaultMaxUsage float64 = 0.95
+const defaultQosRecalculationPeriodS = 120
 
 const defaultAlpha float64 = 0.8
 const proximityMode bool = true
@@ -39,6 +40,7 @@ type Balancer struct {
 	qosPercentage             float64
 	qosRecalculationTime      map[string]time.Time
 	qosRecalculationCooldownS int
+	qosRecalculationPeriodS   int
 
 	alpha float64
 
@@ -126,6 +128,12 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 	}
 	log.Println("QOS_COOLDOWN_S:", qosRecalculationCooldownS)
 
+	qosRecalculationPeriodS, err := strconv.Atoi(os.Getenv("QOS_PERIOD_S"))
+	if err != nil {
+		qosRecalculationPeriodS = defaultQosRecalculationPeriodS
+	}
+	log.Println("QOS_PERIOD_S:", qosRecalculationPeriodS)
+
 	randomMode, err := strconv.ParseBool(os.Getenv("RANDOM_MODE"))
 	if err != nil {
 		randomMode = true
@@ -142,6 +150,7 @@ func NewBalancer(k3sClient *client.K3sClient, ownIP string, pingPort string) *Ba
 		latencyApprWeight:         newLatencyApprWeight,
 		cooldownBaseDurationS:     cooldownBaseDuration,
 		qosRecalculationCooldownS: qosRecalculationCooldownS,
+		qosRecalculationPeriodS:   qosRecalculationPeriodS,
 		qosRecalculationTime:      make(map[string]time.Time),
 		maxResUsage:               maxResUsage,
 		realDataPeriodS:           realDataPeriod,
@@ -215,23 +224,35 @@ func (b *Balancer) ChoosePod(namespace string, service string) (string, string, 
 
 		var weightPods []model.PodInfo
 		for _, pod := range podsAll {
-			if (b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
+			if (b.hostLatency[pod.HostIP] == nil || b.hostLatency[pod.HostIP][service] == nil || int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationPeriodS) && int(time.Since(b.qosRecalculationTime[service]).Seconds()) > b.qosRecalculationCooldownS && b.approxRunning[service].CompareAndSwap(false, true) {
 				b.qosRecalculationTime[service] = time.Now()
+				log.Println("Recaulculating latency :: ", b.qosRecalculationTime, b.qosRecalculationPeriodS)
 				go b.ApproximateLatency(podsAll, service, maxLatency)
 			} else {
 				weightPods = append(weightPods, model.PodInfo{IP: pod.IP, HostIP: pod.HostIP})
 			}
 		}
 
-		for k, v := range b.hostLatency {
-			weightSum += v[service].Weight
-			if randValue < weightSum {
-				for _, wp := range weightPods {
-					if wp.HostIP == k {
-						return wp.IP, wp.HostIP, targetPort
+		if len(weightPods) > 0 {
+			for k, v := range b.hostLatency {
+				if v[service] == nil {
+					continue
+				}
+				log.Println("Weight for", k, v[service].Weight)
+
+				weightSum += v[service].Weight
+				log.Println("Weight sum ::", weightSum)
+				if randValue < weightSum {
+					for _, wp := range weightPods {
+						if wp.HostIP == k {
+							log.Println("Chose pod for", randValue, weightSum, wp.HostIP)
+							return wp.IP, wp.HostIP, targetPort
+						}
 					}
 				}
 			}
+		} else {
+			log.Println("No weight calculated yet, reverting to fall-back way")
 		}
 	}
 
@@ -438,6 +459,12 @@ func (b *Balancer) proximityLatencyWeight(latencies map[string]*model.HostData) 
 }
 
 func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData) {
+	for _, v := range b.hostLatency {
+		if v[service] != nil {
+			v[service].Weight = 0
+		}
+	}
+
 	for k, v := range x {
 		if b.hostLatency[k] == nil {
 			b.hostLatency[k] = make(map[string]*model.HostData)
@@ -450,6 +477,7 @@ func (b *Balancer) adjustLatencies(service string, x map[string]*model.HostData)
 				b.hostLatency[k][service].Latency = v.Latency
 				b.hostLatency[k][service].IsApproximated = v.IsApproximated
 			}
+			b.hostLatency[k][service].Weight = v.Weight
 		}
 	}
 }
