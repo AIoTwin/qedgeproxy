@@ -1,10 +1,10 @@
-# k3s-custom-routing
+# QEdgeProxy
 
 ## Name
-K3S Edge Environment Custom Router
+QEdgeProxy: QoS-aware load balancer for Kubernetes environment
 
 ## Description
-This project contains the code of the Docker image which holds a custom router adjusted for the Edge environment. It is meant to be deployed as a DaemonSet using a Kubernetes distro.
+This project contains the code of the Docker image which holds a QoS-aware load balancer adjusted for the edge environment. It is meant to be deployed as a DaemonSet using a Kubernetes distro.
 
 ## Installation
-kubectl apply -f k3s-router.yaml
+kubectl apply -f qedgeproxy.yaml
