@@ -1,0 +1,77 @@
+apiVersion: apps/v1 
+kind: DaemonSet 
+metadata: 
+  name: k3s-router 
+spec: 
+  selector: 
+    matchLabels: 
+      app: k3s-router 
+  template: 
+    metadata: 
+      labels: 
+        app: k3s-router 
+    spec: 
+      containers: 
+        - name: k3s-router 
+          image: jkvalentin/k3s-edge-router 
+          imagePullPolicy: Always 
+          ports: 
+            - name: proxy 
+              containerPort: 9090 
+          volumeMounts: 
+            - name: secret-volume 
+              mountPath: /etc/secret-volume 
+              readOnly: true 
+          env: 
+            - name: NODE_IP 
+              valueFrom: 
+                fieldRef: 
+                  fieldPath: status.hostIP 
+            - name: NAMESPACE 
+              value: default 
+            - name: QOS_PERC 
+              value: "0.3" 
+            - name: CACHE_TIME_S 
+              value: "60" 
+            - name: LAT_WEIGHT 
+              value: "0.3" 
+            - name: COOLDOWN_BASE_DURATION_S 
+              value: "60" 
+            - name: REAL_DATA_VALID_S 
+              value: "60" 
+            - name: PING_TIMEOUT_S 
+              value: "60" 
+            - name: PING_CACHE_TIME_S 
+              value: "60" 
+            - name: QOS_COOLDOWN_S 
+              value: "60" 
+            - name: RANDOM_MODE 
+              value: "false" 
+            - name: NODE_METRICS_CACHE_TIME_S 
+              value: "60" 
+            - name: LAT_APPR_WEIGHT 
+              value: "0.7" 
+- name: MAX_RES_USAGE 
+              value: "0.95" 
+      volumes: 
+        - name: secret-volume 
+          secret: 
+            secretName: kbc-file
+             
+--- 
+
+apiVersion: v1 
+kind: Service 
+metadata: 
+  name: k3s-router 
+spec: 
+  type: NodePort 
+  selector: 
+    app: k3s-router 
+  ports: 
+    - name: proxy 
+      port: 9000 
+      targetPort: proxy 
+      nodePort: 30090 
+  externalTrafficPolicy: Local 
+  internalTrafficPolicy: Local 
